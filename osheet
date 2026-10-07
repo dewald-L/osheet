@@ -308,8 +308,15 @@ def output_path(cfg, date=None):
     base = os.path.abspath(os.path.expanduser(cfg["output"]))
     if date is None or not cfg.get("group_by"):
         return base
-    stem, ext = os.path.splitext(base)
-    return f"{stem}_{group_label(cfg['group_by'], date)}{ext}"
+    return grouped_path(base, cfg["group_by"], date)
+
+
+def grouped_path(base, group_by, date):
+    """<folder>/<yyyy MM>/<name>_<period>.xlsx; a week is filed under the month of its Monday."""
+    folder, name = os.path.split(base)
+    stem, ext = os.path.splitext(name)
+    start = date - dt.timedelta(days=date.weekday()) if group_by == "week" else date
+    return os.path.join(folder, f"{start:%Y %m}", f"{stem}_{group_label(group_by, date)}{ext}")
 
 
 def save_entries(cfg, entries):
@@ -514,8 +521,7 @@ def setup(existing=None):
     group_by = existing.get("group_by", "week")
 
     while True:
-        stem, ext = os.path.splitext(output)
-        example = f"{stem}_{group_label(group_by, dt.date.today())}{ext}"
+        example = grouped_path(output, group_by, dt.date.today())
         print(f"{BOLD}Defaults:{RESET}")
         print(f"  Project     {CYAN}{defaults['project']}{RESET}")
         print(f"  Entry type  {CYAN}{defaults['category']}{RESET}")
@@ -615,7 +621,7 @@ def copy_to_clipboard(text):
 
 
 def show_dir(cfg):
-    folder = os.path.dirname(output_path(cfg))
+    folder = os.path.dirname(output_path(cfg, dt.date.today()))
     url = "file://" + urllib.parse.quote(folder.replace(os.sep, "/"))
     # OSC 8 hyperlink: clickable in most modern terminals, plain text elsewhere
     print(f"\033]8;;{url}\033\\{BOLD}{folder}{RESET}\033]8;;\033\\")
