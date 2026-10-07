@@ -12,7 +12,7 @@ Requires Python 3.8+ (standard library only). On Windows, menus fall back to num
 
 ## Setup
 
-The first time you run `osheet` it walks you through setup (re-run any time with `osheet --setup`):
+The first time you run `osheet` it walks you through setup, then exits; run `osheet` again to log entries. Re-run setup any time with `osheet --setup`:
 
 1. Asks for your `TimesheetUpload.xlsx` template and reads its columns, projects, entry types, billable flags, locations and sentiments.
 2. Proposes default project, entry type, location, sentiment and output CSV; confirm them or change them.

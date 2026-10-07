@@ -2,7 +2,7 @@
 """osheet - log a timesheet entry to a CSV matching a TimesheetUpload.xlsx template.
 
 Usage:
-    osheet            log an entry (runs setup first if there is no config yet)
+    osheet            log an entry (runs setup instead if there is no config yet)
     osheet --setup    (re)run the configuration step
 """
 
@@ -298,7 +298,8 @@ def setup(existing=None):
     cfg = {"template": template, "output": output, "defaults": defaults, **data}
     save_config(cfg)
     print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
-    return cfg
+    print(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
+    print(f"{DIM}Change these settings any time with: osheet --setup{RESET}")
 
 
 # --- log entry -------------------------------------------------------------
@@ -363,12 +364,11 @@ def main(argv):
         print(__doc__.strip())
         return
     cfg = load_config()
-    if "--setup" in argv:
+    if cfg is None or "--setup" in argv:
+        if cfg is None:
+            print("No config found, let's set osheet up first.\n")
         setup(cfg)
         return
-    if cfg is None:
-        print("No config found, let's set osheet up first.\n")
-        cfg = setup()
     log_entry(cfg)
 
 
