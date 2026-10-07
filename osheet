@@ -312,11 +312,11 @@ def output_path(cfg, date=None):
 
 
 def grouped_path(base, group_by, date):
-    """<folder>/<yyyy MM>/<name>_<period>.xlsx; a week is filed under the month of its Monday."""
+    """<folder>/<yyyy_Month>/<name>_<period>.xlsx; a week is filed under the month of its Monday."""
     folder, name = os.path.split(base)
     stem, ext = os.path.splitext(name)
     start = date - dt.timedelta(days=date.weekday()) if group_by == "week" else date
-    return os.path.join(folder, f"{start:%Y %m}", f"{stem}_{group_label(group_by, date)}{ext}")
+    return os.path.join(folder, f"{start:%Y}_{start:%B}", f"{stem}_{group_label(group_by, date)}{ext}")
 
 
 def save_entries(cfg, entries):

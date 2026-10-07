@@ -49,12 +49,12 @@ Entries go into one Excel file per week or per month, depending on the grouping 
 
 | Grouping | Example file |
 |---|---|
-| Week (Mon–Sun, `dd-dd_MM`) | `~/timesheets/2026 10/TimesheetUpload_05-11_10.xlsx` |
-| Month | `~/timesheets/2026 10/TimesheetUpload_2026-10.xlsx` |
+| Week (Mon–Sun, `dd-dd_MM`) | `~/timesheets/2026_October/TimesheetUpload_05-11_10.xlsx` |
+| Month | `~/timesheets/2026_October/TimesheetUpload_2026-10.xlsx` |
 
 Set `OSHEET_FILE` to write a single run to one specific file instead. The file starts as a copy of your template, so the Lookup/Validation sheets, dropdowns and table are preserved; each entry becomes a new row in the `TimesheetEntry` table, with the date stored as a real Excel date.
 
-Files are stored in a `<yyyy MM>` folder per month; a week that spans two months is filed under the month its Monday falls in. A new file is created from the template whenever an entry falls in a new week or month.
+Files are stored in a `<yyyy_Month>` folder per month (e.g. `2026_October`); a week that spans two months is filed under the month its Monday falls in. A new file is created from the template whenever an entry falls in a new week or month.
 
 Upgrading from an earlier version: osheet asks once how to group files, then moves entries from the old CSV or single Excel file into the grouped files and keeps the old file as `.bak`.
 
