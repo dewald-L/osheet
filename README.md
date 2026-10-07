@@ -55,7 +55,7 @@ Date,Project,Category,Hours,Minutes,Billable,Description,TicketNumber,Sentiment,
 ### Finding the file
 
 ```bash
-osheet --dir
+osheet --export
 ```
 
 Prints the folder containing the timesheet CSV as a clickable link and copies the path to the clipboard (`wl-copy`, `xclip` or `xsel` on Linux, `pbcopy` on macOS, `clip` on Windows).

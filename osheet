@@ -4,7 +4,7 @@
 Usage:
     osheet            log an entry (runs setup instead if there is no config yet)
     osheet --setup    (re)run the configuration step
-    osheet --dir      copy the timesheet folder path to the clipboard
+    osheet --export   copy the timesheet folder path to the clipboard
 """
 
 import csv
@@ -303,7 +303,7 @@ def setup(existing=None):
     save_config(cfg)
     print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
     print(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
-    print(f"{DIM}Copy the timesheet folder path with: osheet --dir{RESET}")
+    print(f"{DIM}Copy the timesheet folder path with: osheet --export{RESET}")
     print(f"{DIM}Change these settings any time with: osheet --setup{RESET}")
 
 
@@ -414,7 +414,7 @@ def main(argv):
             print("No config found, let's set osheet up first.\n")
         setup(cfg)
         return
-    if "--dir" in argv:
+    if "--export" in argv:
         show_dir(cfg)
         return
     log_entry(cfg)
