@@ -285,11 +285,13 @@ GROUP_OPTIONS = {
 }
 
 
-def ask_group_by(current="week"):
+def ask_group_by(form, current="week"):
     labels = list(GROUP_OPTIONS.values())
-    choice = select("Would you like to group timesheet export files by week, or by month?",
-                    labels, pick(list(GROUP_OPTIONS), current))
-    return list(GROUP_OPTIONS)[labels.index(choice)]
+    choice = form.select("group_by", "Would you like to group timesheet export files by week, or by month?",
+                         labels, pick(list(GROUP_OPTIONS), current))
+    group_by = list(GROUP_OPTIONS)[labels.index(choice)]
+    form.set("group_by", f"by {group_by}")
+    return group_by
 
 
 def group_label(group_by, date):
@@ -389,32 +391,18 @@ def read_key(fd):
     return ch
 
 
-def select(question, options, default=0):
-    """Arrow-key menu (arrows, numbers, type-to-filter). Falls back to numbered input without a TTY."""
+def select_numbered(question, options, default=0):
+    """Numbered menu, used when there is no TTY (pipes, Windows)."""
     print(f"{BOLD}? {question}{RESET}")
-    if termios is None or not sys.stdin.isatty():
-        for i, o in enumerate(options, 1):
-            print(f"  {i}. {o}{'  (default)' if i - 1 == default else ''}")
-        ans = input("> ").strip()
-        return options[int(ans) - 1] if ans.isdigit() and 0 < int(ans) <= len(options) else options[default]
-
-    fd = sys.stdin.fileno()
-    old = termios.tcgetattr(fd)
-    tty.setcbreak(fd)
-    sys.stdout.write("\033[?25l")
-    try:
-        choice, drawn = _menu_loop(fd, options, default)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-        sys.stdout.write("\033[?25h")
-    sys.stdout.write(f"\033[{drawn}A\033[J")
-    print(f"  {GREEN}{choice}{RESET}")
-    return choice
+    for i, o in enumerate(options, 1):
+        print(f"  {i}. {o}{'  (default)' if i - 1 == default else ''}")
+    ans = input("> ").strip()
+    return options[int(ans) - 1] if ans.isdigit() and 0 < int(ans) <= len(options) else options[default]
 
 
-def _menu_loop(fd, options, default):
-    idx, query, window = default, "", 10
-    drawn = 0
+def _menu_loop(fd, options, default, draw, window=10):
+    """Arrow-key menu (arrows, numbers, type-to-filter); `draw(lines)` renders it."""
+    idx, query = default, ""
     while True:
         view = [o for o in options if query.lower() in o.lower()] or options
         idx = min(idx, len(view) - 1)
@@ -427,16 +415,11 @@ def _menu_loop(fd, options, default):
         if query:
             hint = f"{DIM}  filter: {RESET}{query}"
         lines.append(hint)
-        if drawn:
-            sys.stdout.write(f"\033[{drawn}A")
-        sys.stdout.write("".join(f"\033[2K{line}\n" for line in lines))
-        sys.stdout.write("\033[J")
-        sys.stdout.flush()
-        drawn = len(lines)
+        draw(lines)
 
         k = read_key(fd)
         if k in (b"\r", b"\n"):
-            return view[idx], drawn
+            return view[idx]
         if k == b"\x1b[A":
             idx = (idx - 1) % len(view)
         elif k == b"\x1b[B":
@@ -453,6 +436,117 @@ def ask(question, default=""):
     suffix = f" {DIM}({default}){RESET}" if default else ""
     ans = input(f"{BOLD}? {question}{RESET}{suffix} ").strip()
     return ans or default
+
+
+ANSI_RE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
+
+
+def fit(line, width):
+    """Cut `line` to `width` visible characters, skipping over ANSI codes."""
+    out, n = [], 0
+    for part in re.split(f"({ANSI_RE.pattern})", line):
+        if ANSI_RE.fullmatch(part):
+            out.append(part)
+        elif n + len(part) > width:
+            out.append(part[:max(0, width - n - 1)] + "…" + RESET)
+            break
+        else:
+            out.append(part)
+            n += len(part)
+    return "".join(out)
+
+
+class Form:
+    """Panel of `Label  value` lines that redraws in place as questions are answered,
+    with the current question drawn below it. Without a TTY, questions and answers
+    are printed as plain lines instead."""
+
+    def __init__(self, fields):
+        self.fields = fields   # [(key, label)]
+        self.values = {}       # key -> (text, note)
+        self.active = None
+        self.drawn = 0         # lines from the top of the panel down to the cursor
+        self.live = termios is not None and sys.stdin.isatty()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        # Done or cancelled: clear the question area and leave the panel on screen
+        if self.live:
+            self.redraw()
+
+    def set(self, key, text, note=""):
+        if key is not None:
+            self.values[key] = (text, note)
+        self.active = None
+
+    def render(self):
+        width = max((len(label) for _, label in self.fields), default=0)
+        lines = []
+        for key, label in self.fields:
+            text, note = self.values.get(key, ("", ""))
+            value = text + (f" {DIM}{note}{RESET}" if note else "") if text else f"{DIM}—{RESET}"
+            if key == self.active:
+                lines.append(f"{CYAN}❯ {label:<{width}}  {BOLD}{value}{RESET}")
+            else:
+                lines.append(f"  {DIM}{label:<{width}}{RESET}  {BOLD}{value}{RESET}")
+        return lines
+
+    def redraw(self, question=()):
+        """Redraw the panel plus `question` lines over what was drawn before."""
+        cols = shutil.get_terminal_size().columns
+        lines = self.render() + ([""] if self.fields and question else []) + list(question)
+        up = f"\033[{self.drawn}A" if self.drawn else ""
+        sys.stdout.write("\r" + up + "".join(f"\033[2K{fit(line, cols - 1)}\n" for line in lines) + "\033[J")
+        sys.stdout.flush()
+        self.drawn = len(lines)
+
+    def select(self, key, question, options, default=0):
+        """Menu for `key`, drawn under the panel."""
+        if not self.live:
+            choice = select_numbered(question, options, default)
+        else:
+            self.active = key
+            header = f"{BOLD}? {question}{RESET}"
+            room = shutil.get_terminal_size().lines - len(self.fields) - 4
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+            sys.stdout.write("\033[?25l")
+            try:
+                choice = _menu_loop(fd, options, default, lambda lines: self.redraw([header] + lines),
+                                    window=max(3, min(10, room)))
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                sys.stdout.write("\033[?25h")
+        self.set(key, choice)
+        return choice
+
+    def ask(self, key, question, default="", check=None):
+        """Text input for `key`, drawn under the panel. `check(answer)` returns the value to
+        use or raises ValueError, whose message is shown under the question before asking again."""
+        error = ""
+        while True:
+            if self.live:
+                self.active = key
+                suffix = f" {DIM}({default}){RESET}" if default else ""
+                self.redraw([f"{BOLD}? {question}{RESET}{suffix}"] + ([f"  {error}"] if error else []))
+                raw = input(f"  {CYAN}❯{RESET} ")
+                # The input line (wrapped if long) now sits above the cursor too
+                self.drawn += (4 + len(raw) - 1) // shutil.get_terminal_size().columns + 1
+                ans = raw.strip() or default
+            else:
+                if error:
+                    print(f"  {error}")
+                ans = ask(question, default)
+            try:
+                value = check(ans) if check else ans
+                break
+            except ValueError as e:
+                error = str(e)
+        self.set(key, ans)
+        return value
 
 
 def parse_duration(text):
@@ -474,34 +568,61 @@ def parse_duration(text):
 
 # --- setup -----------------------------------------------------------------
 
-def choose_defaults(data, defaults):
+def choose_defaults(form, data, defaults):
     projects = list(data["projects"])
-    project = select("Default project?", projects, pick(projects, defaults["project"]))
+    project = form.select("project", "Default project?", projects, pick(projects, defaults["project"]))
     cats = data["projects"][project]["categories"]
-    category = select("Default entry type?", cats, pick(cats, defaults["category"]))
-    location = select("Default location?", data["locations"], pick(data["locations"], defaults["location"]))
-    sentiment = select("Default sentiment?", data["sentiments"], pick(data["sentiments"], defaults["sentiment"]))
+    category = form.select("category", "Default entry type?", cats, pick(cats, defaults["category"]))
+    location = form.select("location", "Default location?", data["locations"],
+                           pick(data["locations"], defaults["location"]))
+    sentiment = form.select("sentiment", "Default sentiment?", data["sentiments"],
+                            pick(data["sentiments"], defaults["sentiment"]))
     return {"project": project, "category": category, "location": location, "sentiment": sentiment}
+
+
+def load_template(raw):
+    """(path, parsed template) for a path typed by the user; ValueError if it can't be used."""
+    template = os.path.abspath(os.path.expanduser(raw.strip().strip("'\"")))
+    try:
+        return template, parse_template(template)
+    except FileNotFoundError:
+        raise ValueError(f"{RED}File not found:{RESET} {template}")
+    except (zipfile.BadZipFile, KeyError, ValueError) as e:
+        raise ValueError(f"{RED}Couldn't read that template:{RESET} {e}")
+
+
+SETUP_FIELDS = [("template", "Template"), ("project", "Project"), ("category", "Entry type"),
+                ("location", "Location"), ("sentiment", "Sentiment"), ("group_by", "Group files"),
+                ("output", "Save to")]
 
 
 def setup(existing=None):
     existing = existing or {}
     print(f"{BOLD}osheet setup{RESET} {DIM}(config: {CONFIG_PATH}){RESET}\n")
+    with Form(SETUP_FIELDS) as form:
+        template, data, defaults, output, group_by = _setup_form(form, existing)
 
+    store_template(template)
+    cfg = {"template": template, "output": output, "group_by": group_by, "defaults": defaults, **data}
+    save_config(cfg)
+    if form.live:
+        print()
+    print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
+    print(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
+    print(f"{DIM}Copy the timesheet folder path with: osheet --export{RESET}")
+    print(f"{DIM}Change these settings any time with: osheet --setup{RESET}")
+
+
+def _setup_form(form, existing):
     # Template
     suggested = existing.get("template") or DEFAULT_TEMPLATE
-    while True:
-        raw = ask("Path to the timesheet template (.xlsx)?", suggested)
-        template = os.path.abspath(os.path.expanduser(raw.strip().strip("'\"")))
-        try:
-            data = parse_template(template)
-            break
-        except FileNotFoundError:
-            print(f"  {RED}File not found:{RESET} {template}")
-        except (zipfile.BadZipFile, KeyError, ValueError) as e:
-            print(f"  {RED}Couldn't read that template:{RESET} {e}")
+    template, data = form.ask("template", "Path to the timesheet template (.xlsx)?", suggested,
+                              check=load_template)
     n_cats = sum(len(p["categories"]) for p in data["projects"].values())
-    print(f"  {GREEN}Found {len(data['projects'])} projects, {n_cats} entry types{RESET}\n")
+    shown = template.replace(os.path.expanduser("~"), "~", 1)
+    form.set("template", shown, f"({len(data['projects'])} projects, {n_cats} entry types)")
+    if not form.live:
+        print(f"  {GREEN}Found {len(data['projects'])} projects, {n_cats} entry types{RESET}\n")
 
     # Proposed defaults: keep previous choices where still valid
     projects = list(data["projects"])
@@ -522,33 +643,42 @@ def setup(existing=None):
 
     while True:
         example = grouped_path(output, group_by, dt.date.today())
-        print(f"{BOLD}Defaults:{RESET}")
-        print(f"  Project     {CYAN}{defaults['project']}{RESET}")
-        print(f"  Entry type  {CYAN}{defaults['category']}{RESET}")
-        print(f"  Location    {CYAN}{defaults['location']}{RESET}")
-        print(f"  Sentiment   {CYAN}{defaults['sentiment']}{RESET}")
-        print(f"  Group files {CYAN}by {group_by}{RESET}")
-        print(f"  Save to     {CYAN}{example}{RESET} {DIM}(e.g.){RESET}\n")
-        answer = select("Use these defaults?", ["Yes, save", "Change them"])
+        for key in ("project", "category", "location", "sentiment"):
+            form.set(key, defaults[key])
+        form.set("group_by", f"by {group_by}")
+        form.set("output", example, "(e.g.)")
+        if not form.live:
+            print(f"{BOLD}Defaults:{RESET}")
+            print(f"  Project     {CYAN}{defaults['project']}{RESET}")
+            print(f"  Entry type  {CYAN}{defaults['category']}{RESET}")
+            print(f"  Location    {CYAN}{defaults['location']}{RESET}")
+            print(f"  Sentiment   {CYAN}{defaults['sentiment']}{RESET}")
+            print(f"  Group files {CYAN}by {group_by}{RESET}")
+            print(f"  Save to     {CYAN}{example}{RESET} {DIM}(e.g.){RESET}\n")
+        answer = form.select(None, "Use these defaults?", ["Yes, save", "Change them"])
         if answer.startswith("Yes"):
-            break
-        defaults = choose_defaults(data, defaults)
-        group_by = ask_group_by(group_by)
-        output = ask("Save entries as? (the week/month is added to the name)", output)
+            return template, data, defaults, output, group_by
+        defaults = choose_defaults(form, data, defaults)
+        group_by = ask_group_by(form, group_by)
+        output = form.ask("output", "Save entries as? (the week/month is added to the name)", output)
         if not output.lower().endswith(".xlsx"):
             output += ".xlsx"
-        print()
-
-    store_template(template)
-    cfg = {"template": template, "output": output, "group_by": group_by, "defaults": defaults, **data}
-    save_config(cfg)
-    print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
-    print(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
-    print(f"{DIM}Copy the timesheet folder path with: osheet --export{RESET}")
-    print(f"{DIM}Change these settings any time with: osheet --setup{RESET}")
+        if not form.live:
+            print()
 
 
 # --- log entry -------------------------------------------------------------
+
+ENTRY_FIELDS = [("day", "Day"), ("project", "Project"), ("category", "Entry type"),
+                ("time", "Time"), ("location", "Location"), ("description", "Description")]
+
+
+def check_duration(raw):
+    minutes = parse_duration(raw) if raw else None
+    if not (minutes and 0 < minutes <= 24 * 60):
+        raise ValueError("Couldn't read that as a duration between 1 minute and 24 hours, try again.")
+    return minutes
+
 
 def log_entry(cfg):
     defaults = cfg["defaults"]
@@ -557,33 +687,34 @@ def log_entry(cfg):
     days = [monday + dt.timedelta(days=i) for i in range(7)]
     labels = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
 
-    # 1. Day
-    label = select("Which day is the timesheet for?", labels, default=today.weekday())
-    date = days[labels.index(label)]
+    with Form(ENTRY_FIELDS) as form:
+        # 1. Day
+        label = form.select("day", "Which day is the timesheet for?", labels, default=today.weekday())
+        date = days[labels.index(label)]
+        form.set("day", f"{date:%A %d %b}")
 
-    # 2. Project + type of entry
-    projects = list(cfg["projects"])
-    project = select("Which project?", projects, pick(projects, defaults["project"]))
-    billable = cfg["projects"][project]["billable"]
-    categories = cfg["projects"][project]["categories"]
-    category = select("What type of entry is it?", categories, pick(categories, defaults["category"]))
+        # 2. Project + type of entry
+        projects = list(cfg["projects"])
+        project = form.select("project", "Which project?", projects, pick(projects, defaults["project"]))
+        billable = cfg["projects"][project]["billable"]
+        categories = cfg["projects"][project]["categories"]
+        category = form.select("category", "What type of entry is it?", categories,
+                               pick(categories, defaults["category"]))
 
-    # 3. Time, rounded up to the next 15 minutes
-    while True:
-        raw = ask("Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)")
-        minutes = parse_duration(raw) if raw else None
-        if minutes and 0 < minutes <= 24 * 60:
-            break
-        print("  Couldn't read that as a duration between 1 minute and 24 hours, try again.")
-    rounded = math.ceil(minutes / 15) * 15
-    hours, mins = divmod(rounded, 60)
-    note = f" {DIM}(rounded up from {minutes // 60}h{minutes % 60:02d}){RESET}" if rounded != minutes else ""
-    print(f"  {GREEN}{hours}h{mins:02d}{RESET}{note}")
+        # 3. Time, rounded up to the next 15 minutes
+        minutes = form.ask("time", "Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)", check=check_duration)
+        rounded = math.ceil(minutes / 15) * 15
+        hours, mins = divmod(rounded, 60)
+        note = f"(rounded up from {minutes // 60}h{minutes % 60:02d})" if rounded != minutes else ""
+        form.set("time", f"{hours}h{mins:02d}", note)
+        if not form.live:
+            print(f"  {GREEN}{hours}h{mins:02d}{RESET}{f' {DIM}{note}{RESET}' if note else ''}")
 
-    # 4. Location
-    location = select("Where did you work from?", cfg["locations"], pick(cfg["locations"], defaults["location"]))
+        # 4. Location
+        location = form.select("location", "Where did you work from?", cfg["locations"],
+                               pick(cfg["locations"], defaults["location"]))
 
-    description = ask("Description? (optional)")
+        description = form.ask("description", "Description? (optional)")
 
     # 5. Store
     values = {
@@ -640,7 +771,8 @@ def main(argv):
         return
     cfg = load_config()
     if cfg is not None and "group_by" not in cfg:
-        cfg["group_by"] = ask_group_by()
+        with Form([("group_by", "Group files")]) as form:
+            cfg["group_by"] = ask_group_by(form)
         save_config(cfg)
         print()
     if cfg is not None:

@@ -41,6 +41,8 @@ Prompts for:
 5. **Location** (WorkedFrom), using the options from the template
 6. **Description** (optional)
 
+Answers fill in a panel at the top (`Day`, `Project`, `Entry type`, `Time`, `Location`, `Description`) that updates in place, with the current question shown below it; when you're done, only the completed panel and the saved file path stay in the terminal. Setup works the same way for the template and defaults. Without a TTY (piped input) the questions and answers are printed as plain lines instead.
+
 In menus: ↑/↓ to move, Enter to select, type to filter, digits to jump.
 
 ## Output
