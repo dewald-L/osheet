@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""osheet - log a timesheet entry to a CSV matching a TimesheetUpload.xlsx template.
+"""osheet - log timesheet entries to an Excel file based on a TimesheetUpload.xlsx template.
 
 Usage:
     osheet            log an entry (runs setup instead if there is no config yet)
@@ -31,7 +31,7 @@ DEFAULT_COLUMNS = ["Date", "Project", "Category", "Hours", "Minutes", "Billable"
                    "Description", "TicketNumber", "Sentiment", "WorkedFrom"]
 DEFAULT_LOCATIONS = ["Home", "Office", "Client", "Other"]
 DEFAULT_SENTIMENTS = ["Neutral", "Happy", "Sad"]
-DEFAULT_OUTPUT = os.path.join("~", "timesheets", "TimesheetUpload.csv")
+DEFAULT_OUTPUT = os.path.join("~", "timesheets", "TimesheetUpload.xlsx")
 DEFAULT_TEMPLATE = os.path.join("~", "Downloads", "TimesheetUpload.xlsx")
 
 BOLD, DIM, CYAN, GREEN, RED, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[31m", "\033[0m"
@@ -139,6 +139,167 @@ def parse_template(path):
     locations = [v for v in column_values(validation, "WorkedFrom") if v != "NotSet"] or DEFAULT_LOCATIONS
     sentiments = column_values(validation, "Sentiment") or DEFAULT_SENTIMENTS
     return {"columns": columns, "projects": projects, "locations": locations, "sentiments": sentiments}
+
+
+# --- workbook output -------------------------------------------------------
+
+TEMPLATE_COPY = os.path.join(config_dir(), "template.xlsx")
+EXCEL_EPOCH = dt.date(1899, 12, 30)
+
+
+def store_template(src):
+    """Keep a private copy of the template so the original can be moved or deleted."""
+    os.makedirs(os.path.dirname(TEMPLATE_COPY), exist_ok=True)
+    if os.path.abspath(src) != os.path.abspath(TEMPLATE_COPY):
+        shutil.copyfile(src, TEMPLATE_COPY)
+
+
+def template_path(cfg):
+    if not os.path.exists(TEMPLATE_COPY):
+        store_template(cfg["template"])
+    return TEMPLATE_COPY
+
+
+def entry_sheet_parts(files):
+    """Return (sheet xml path, [table xml paths]) for the timesheet entry sheet."""
+    rels = {r.get("Id"): r.get("Target") for r in ET.fromstring(files["xl/_rels/workbook.xml.rels"])}
+    for s in ET.fromstring(files["xl/workbook.xml"]).iter(NS + "sheet"):
+        if s.get("name") in ("Lookup", "Validation"):
+            continue
+        target = rels[s.get(REL_NS + "id")].lstrip("/")
+        sheet = target if target.startswith("xl/") else posixpath.join("xl", target)
+        folder, name = posixpath.split(sheet)
+        sheet_rels = posixpath.join(folder, "_rels", name + ".rels")
+        tables = []
+        if sheet_rels in files:
+            for r in ET.fromstring(files[sheet_rels]):
+                if r.get("Type", "").endswith("/table"):
+                    tables.append(posixpath.normpath(posixpath.join(folder, r.get("Target"))))
+        return sheet, tables
+    raise ValueError("no timesheet entry sheet found")
+
+
+def xml_escape(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def shared_string_index(files, text, cache):
+    """Index of `text` in sharedStrings.xml, appending it if needed."""
+    if not cache:
+        sst = ET.fromstring(files["xl/sharedStrings.xml"])
+        for i, si in enumerate(sst.iter(NS + "si")):
+            cache.setdefault("".join(t.text or "" for t in si.iter(NS + "t")), i)
+    if text not in cache:
+        xml = files["xl/sharedStrings.xml"].decode("utf-8")
+        xml = xml.replace("</sst>", f'<si><t xml:space="preserve">{xml_escape(text)}</t></si></sst>')
+        files["xl/sharedStrings.xml"] = xml.encode("utf-8")
+        cache[text] = len(cache)
+    return cache[text]
+
+
+def date_style_index(files):
+    """Index of a cellXfs style with a built-in date format, adding one if needed."""
+    xml = files["xl/styles.xml"].decode("utf-8")
+    block = re.search(r"<cellXfs[^>]*>(.*?)</cellXfs>", xml, re.S)
+    xfs = re.findall(r"<xf\b[^>]*?(?:/>|>.*?</xf>)", block.group(1), re.S)
+    for i, xf in enumerate(xfs):
+        if 'numFmtId="14"' in xf:
+            return i
+    new = '<xf numFmtId="14" applyNumberFormat="1" fontId="0" applyFont="1" xfId="0" />'
+    xml = xml[:block.end(1)] + new + xml[block.end(1):]
+    xml = re.sub(r'(<cellXfs[^>]*count=")\d+', rf"\g<1>{len(xfs) + 1}", xml, count=1)
+    files["xl/styles.xml"] = xml.encode("utf-8")
+    return len(xfs)
+
+
+def append_rows(path, template, entries):
+    """Append entries (dicts keyed by column header) to the workbook at `path`,
+    creating it from `template` if it doesn't exist yet."""
+    src = path if os.path.exists(path) else template
+    with zipfile.ZipFile(src) as z:
+        infos = z.infolist()
+        files = {i.filename: z.read(i.filename) for i in infos}
+
+    sheet_path, table_paths = entry_sheet_parts(files)
+    sheet = ET.fromstring(files[sheet_path])
+    rows = list(sheet.iter(NS + "row"))
+    letters = {}
+    for c in rows[0].iter(NS + "c"):
+        v = c.find(NS + "v")
+        if v is not None and c.get("t") == "s":
+            text = ET.fromstring(files["xl/sharedStrings.xml"]).findall(NS + "si")[int(v.text)]
+            letters["".join(t.text or "" for t in text.iter(NS + "t"))] = re.match(r"[A-Z]+", c.get("r")).group()
+    date_col = letters.get("Date", "A")
+    last_col = max(letters.values(), key=lambda s: (len(s), s))
+
+    xml = files[sheet_path].decode("utf-8")
+    last = int(rows[-1].get("r"))
+    # The template ships with a placeholder row 2 (defaults only, no date): replace it
+    if last == 2 and not any(re.match(rf"{date_col}2$", c.get("r")) for c in rows[-1].iter(NS + "c")):
+        xml = re.sub(r'<row r="2"[^>]*?(?:/>|>.*?</row>)', "", xml, flags=re.S)
+        last = 1
+
+    cache, date_style, new_rows = {}, date_style_index(files), []
+    for n, entry in enumerate(entries, start=last + 1):
+        cells = []
+        for header, col in sorted(letters.items(), key=lambda kv: (len(kv[1]), kv[1])):
+            value = entry.get(header)
+            if value in (None, ""):
+                continue
+            ref = f"{col}{n}"
+            if isinstance(value, dt.date):
+                cells.append(f'<c r="{ref}" s="{date_style}"><v>{(value - EXCEL_EPOCH).days}</v></c>')
+            elif isinstance(value, (int, float)):
+                cells.append(f'<c r="{ref}" s="0"><v>{value}</v></c>')
+            else:
+                idx = shared_string_index(files, str(value), cache)
+                cells.append(f'<c r="{ref}" s="0" t="s"><v>{idx}</v></c>')
+        new_rows.append(f'<row r="{n}">{"".join(cells)}</row>')
+    end = last + len(entries)
+
+    xml = xml.replace("</sheetData>", "".join(new_rows) + "</sheetData>")
+    xml = re.sub(r'(<dimension ref=")[^"]*', rf"\g<1>A1:{last_col}{end}", xml)
+    xml = re.sub(r'sqref="([A-Z]+)2:\1\d+"', rf'sqref="\g<1>2:\g<1>{end}"', xml)
+    files[sheet_path] = xml.encode("utf-8")
+    for t in table_paths:
+        txml = files[t].decode("utf-8")
+        txml = re.sub(r'ref="([A-Z]+)1:([A-Z]+)\d+"', rf'ref="\g<1>1:\g<2>{end}"', txml)
+        files[t] = txml.encode("utf-8")
+
+    sst = files["xl/sharedStrings.xml"].decode("utf-8")
+    total = len(re.findall(r"<si>", sst))
+    sst = re.sub(r'uniqueCount="\d+"', f'uniqueCount="{total}"', sst, count=1)
+    sst = re.sub(r'(<sst[^>]*?) count="\d+"', rf'\g<1> count="{total}"', sst, count=1)
+    files["xl/sharedStrings.xml"] = sst.encode("utf-8")
+
+    tmp = path + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for info in infos:
+            z.writestr(info, files[info.filename])
+    os.replace(tmp, path)
+
+
+def migrate_csv(cfg):
+    """One-off: move entries from an old CSV output into the Excel file."""
+    old = os.path.expanduser(cfg["output"])
+    if not old.lower().endswith(".csv"):
+        return cfg
+    cfg["output"] = cfg["output"][:-4] + ".xlsx"
+    if os.path.exists(old):
+        with open(old, newline="") as f:
+            entries = list(csv.DictReader(f))
+        for e in entries:
+            e["Date"] = dt.date.fromisoformat(e["Date"])
+            for k in ("Hours", "Minutes"):
+                e[k] = int(e[k])
+        new = output_path(cfg)
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        if entries:
+            append_rows(new, template_path(cfg), entries)
+        os.replace(old, old + ".bak")
+        print(f"{DIM}Moved {len(entries)} entries from {old} → {new} (old file kept as .csv.bak){RESET}\n")
+    save_config(cfg)
+    return cfg
 
 
 # --- prompts ---------------------------------------------------------------
@@ -296,9 +457,12 @@ def setup(existing=None):
         if answer.startswith("Yes"):
             break
         defaults = choose_defaults(data, defaults)
-        output = ask("Save entries to which CSV file?", output)
+        output = ask("Save entries to which Excel file?", output)
+        if not output.lower().endswith(".xlsx"):
+            output += ".xlsx"
         print()
 
+    store_template(template)
     cfg = {"template": template, "output": output, "defaults": defaults, **data}
     save_config(cfg)
     print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
@@ -346,19 +510,14 @@ def log_entry(cfg):
 
     # 5. Store
     values = {
-        "Date": date.isoformat(), "Project": project, "Category": category,
+        "Date": date, "Project": project, "Category": category,
         "Hours": hours, "Minutes": mins, "Billable": billable,
         "Description": description, "TicketNumber": "", "Sentiment": defaults["sentiment"],
         "WorkedFrom": location,
     }
     path = output_path(cfg)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    new_file = not os.path.exists(path) or os.path.getsize(path) == 0
-    with open(path, "a", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=cfg["columns"], extrasaction="ignore", restval="")
-        if new_file:
-            w.writeheader()
-        w.writerow(values)
+    append_rows(path, template_path(cfg), [values])
 
     print(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {project} / {category} · {hours}h{mins:02d} · {location}")
     print(f"{DIM}  → {path}{RESET}")
@@ -409,6 +568,8 @@ def main(argv):
         print(__doc__.strip())
         return
     cfg = load_config()
+    if cfg is not None:
+        cfg = migrate_csv(cfg)
     if cfg is None or "--setup" in argv:
         if cfg is None:
             print("No config found, let's set osheet up first.\n")

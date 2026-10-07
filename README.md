@@ -1,6 +1,6 @@
 # osheet
 
-Interactive terminal tool for logging timesheet entries to a CSV that matches the `TimesheetUpload.xlsx` template.
+Interactive terminal tool for logging timesheet entries into an Excel file built from the `TimesheetUpload.xlsx` template, ready to upload.
 
 ## Install
 
@@ -24,7 +24,7 @@ The first time you run `osheet` it walks you through setup, then exits; run `osh
 | macOS | `~/Library/Application Support/osheet/config.json` |
 | Windows | `%APPDATA%\osheet\config.json` |
 
-The template contents are copied into the config, so the `.xlsx` can be moved or deleted afterwards. Re-run `osheet --setup` when the template changes.
+A copy of the template is kept next to the config (`template.xlsx`), so the original can be moved or deleted afterwards. Re-run `osheet --setup` when the template changes.
 
 ## Usage
 
@@ -45,12 +45,11 @@ In menus: ↑/↓ to move, Enter to select, type to filter, digits to jump.
 
 ## Output
 
-Rows are appended to the CSV chosen during setup (default `~/timesheets/TimesheetUpload.csv`; override per run with `OSHEET_FILE`), using the template's column order:
+Entries are appended to the Excel file chosen during setup (default `~/timesheets/TimesheetUpload.xlsx`; override per run with `OSHEET_FILE`). The file starts as a copy of your template, so the Lookup/Validation sheets, dropdowns and table are preserved; each entry becomes a new row in the `TimesheetEntry` table, with the date stored as a real Excel date.
 
-```
-Date,Project,Category,Hours,Minutes,Billable,Description,TicketNumber,Sentiment,WorkedFrom
-2026-10-06,Some Project,Meetings,2,15,Yes,standup,,Neutral,Home
-```
+Start a fresh file (e.g. after uploading) by moving or deleting the old one; the next entry creates a new one from the template.
+
+If you used an earlier CSV version of osheet, its entries are moved into the Excel file automatically and the CSV is kept as `.csv.bak`.
 
 ### Finding the file
 
