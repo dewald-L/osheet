@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+"""osheet - log a timesheet entry to a CSV matching a TimesheetUpload.xlsx template.
+
+Usage:
+    osheet            log an entry (runs setup first if there is no config yet)
+    osheet --setup    (re)run the configuration step
+"""
+
+import csv
+import datetime as dt
+import json
+import math
+import os
+import posixpath
+import re
+import sys
+import xml.etree.ElementTree as ET
+import zipfile
+
+try:
+    import termios
+    import tty
+except ImportError:  # Windows: menus fall back to numbered input
+    termios = tty = None
+
+DEFAULT_COLUMNS = ["Date", "Project", "Category", "Hours", "Minutes", "Billable",
+                   "Description", "TicketNumber", "Sentiment", "WorkedFrom"]
+DEFAULT_LOCATIONS = ["Home", "Office", "Client", "Other"]
+DEFAULT_SENTIMENTS = ["Neutral", "Happy", "Sad"]
+DEFAULT_OUTPUT = os.path.join("~", "timesheets", "TimesheetUpload.csv")
+DEFAULT_TEMPLATE = os.path.join("~", "Downloads", "TimesheetUpload.xlsx")
+
+BOLD, DIM, CYAN, GREEN, RED, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[31m", "\033[0m"
+
+
+# --- config ----------------------------------------------------------------
+
+def config_dir():
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.path.expanduser(r"~\AppData\Roaming")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Application Support")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "osheet")
+
+
+CONFIG_PATH = os.path.join(config_dir(), "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def save_config(cfg):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+# --- template --------------------------------------------------------------
+
+NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def read_xlsx(path):
+    """Return {sheet name: [ {column letter: value} per row ]} using only the standard library."""
+    with zipfile.ZipFile(path) as z:
+        strings = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            for si in ET.fromstring(z.read("xl/sharedStrings.xml")).iter(NS + "si"):
+                strings.append("".join(t.text or "" for t in si.iter(NS + "t")))
+        rels = {r.get("Id"): r.get("Target")
+                for r in ET.fromstring(z.read("xl/_rels/workbook.xml.rels"))}
+        sheets = {}
+        for s in ET.fromstring(z.read("xl/workbook.xml")).iter(NS + "sheet"):
+            target = rels[s.get(REL_NS + "id")].lstrip("/")
+            target = target if target.startswith("xl/") else posixpath.join("xl", target)
+            rows = []
+            for r in ET.fromstring(z.read(target)).iter(NS + "row"):
+                row = {}
+                for c in r.iter(NS + "c"):
+                    v = c.find(NS + "v")
+                    if v is None:
+                        is_ = c.find(NS + "is")
+                        if is_ is None:
+                            continue
+                        val = "".join(t.text or "" for t in is_.iter(NS + "t"))
+                    else:
+                        val = strings[int(v.text)] if c.get("t") == "s" else v.text
+                    row[re.match(r"[A-Z]+", c.get("r")).group()] = val
+                rows.append(row)
+            sheets[s.get("name")] = rows
+    return sheets
+
+
+def column_values(rows, header):
+    """All non-empty values below `header` in the first row."""
+    if not rows:
+        return []
+    col = next((k for k, v in rows[0].items() if v == header), None)
+    return [r[col] for r in rows[1:] if col and r.get(col)] if col else []
+
+
+def parse_template(path):
+    sheets = read_xlsx(path)
+    lookup = sheets.get("Lookup")
+    if not lookup:
+        raise ValueError("no 'Lookup' sheet found")
+    head = {v: k for k, v in lookup[0].items()}
+    if not {"Project", "Category"} <= head.keys():
+        raise ValueError("'Lookup' sheet needs Project and Category columns")
+
+    projects, current = {}, None
+    for r in lookup[1:]:
+        current = r.get(head["Project"], current)
+        cat = r.get(head["Category"])
+        if not current or not cat:
+            continue
+        p = projects.setdefault(current, {"billable": "No", "categories": []})
+        p["categories"].append(cat)
+        if r.get(head.get("Billable")) == "Yes":
+            p["billable"] = "Yes"
+    if not projects:
+        raise ValueError("no projects found in the 'Lookup' sheet")
+
+    entry = next((rows for name, rows in sheets.items() if name not in ("Lookup", "Validation")), [])
+    columns = list(entry[0].values()) if entry else DEFAULT_COLUMNS
+    validation = sheets.get("Validation", [])
+    locations = [v for v in column_values(validation, "WorkedFrom") if v != "NotSet"] or DEFAULT_LOCATIONS
+    sentiments = column_values(validation, "Sentiment") or DEFAULT_SENTIMENTS
+    return {"columns": columns, "projects": projects, "locations": locations, "sentiments": sentiments}
+
+
+# --- prompts ---------------------------------------------------------------
+
+def pick(options, preferred, fallback=0):
+    """Index of `preferred` in options, else `fallback`."""
+    return options.index(preferred) if preferred in options else fallback
+
+
+def read_key(fd):
+    ch = os.read(fd, 1)
+    if ch == b"\x1b":
+        ch += os.read(fd, 2)
+    return ch
+
+
+def select(question, options, default=0):
+    """Arrow-key menu (arrows, numbers, type-to-filter). Falls back to numbered input without a TTY."""
+    print(f"{BOLD}? {question}{RESET}")
+    if termios is None or not sys.stdin.isatty():
+        for i, o in enumerate(options, 1):
+            print(f"  {i}. {o}{'  (default)' if i - 1 == default else ''}")
+        ans = input("> ").strip()
+        return options[int(ans) - 1] if ans.isdigit() and 0 < int(ans) <= len(options) else options[default]
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    sys.stdout.write("\033[?25l")
+    try:
+        choice, drawn = _menu_loop(fd, options, default)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\033[?25h")
+    sys.stdout.write(f"\033[{drawn}A\033[J")
+    print(f"  {GREEN}{choice}{RESET}")
+    return choice
+
+
+def _menu_loop(fd, options, default):
+    idx, query, window = default, "", 10
+    drawn = 0
+    while True:
+        view = [o for o in options if query.lower() in o.lower()] or options
+        idx = min(idx, len(view) - 1)
+        top = max(0, min(idx - window // 2, len(view) - window))
+        lines = []
+        for i in range(top, min(top + window, len(view))):
+            mark = f"{CYAN}❯ {view[i]}{RESET}" if i == idx else f"  {view[i]}"
+            lines.append(mark)
+        hint = f"{DIM}  ↑/↓ move · enter select · type to filter{RESET}"
+        if query:
+            hint = f"{DIM}  filter: {RESET}{query}"
+        lines.append(hint)
+        if drawn:
+            sys.stdout.write(f"\033[{drawn}A")
+        sys.stdout.write("".join(f"\033[2K{line}\n" for line in lines))
+        sys.stdout.write("\033[J")
+        sys.stdout.flush()
+        drawn = len(lines)
+
+        k = read_key(fd)
+        if k in (b"\r", b"\n"):
+            return view[idx], drawn
+        if k == b"\x1b[A":
+            idx = (idx - 1) % len(view)
+        elif k == b"\x1b[B":
+            idx = (idx + 1) % len(view)
+        elif k in (b"\x7f", b"\x08"):
+            query, idx = query[:-1], 0
+        elif len(k) == 1 and k.isdigit() and not query and 0 < int(k) <= len(view):
+            idx = int(k) - 1
+        elif len(k) == 1 and 32 <= k[0] < 127:
+            query, idx = query + k.decode(), 0
+
+
+def ask(question, default=""):
+    suffix = f" {DIM}({default}){RESET}" if default else ""
+    ans = input(f"{BOLD}? {question}{RESET}{suffix} ").strip()
+    return ans or default
+
+
+def parse_duration(text):
+    """Return minutes. Accepts 1:30, 1h30, 1h 30m, 90m, 1.5h, 1.5 (hours), 90 (minutes if > 24)."""
+    t = text.strip().lower().replace(" ", "")
+    if m := re.fullmatch(r"(\d+):(\d{1,2})", t):
+        return int(m[1]) * 60 + int(m[2])
+    if m := re.fullmatch(r"(?:(\d+(?:\.\d+)?)h)?(?:(\d+)m?)?", t):
+        if m[1] is None and m[2] is None:
+            return None
+        if m[1] is not None:
+            return round(float(m[1]) * 60) + int(m[2] or 0)
+        n = int(m[2])
+        return n if t.endswith("m") or n > 24 else n * 60
+    if m := re.fullmatch(r"(\d*\.\d+)", t):
+        return round(float(m[1]) * 60)
+    return None
+
+
+# --- setup -----------------------------------------------------------------
+
+def choose_defaults(data, defaults):
+    projects = list(data["projects"])
+    project = select("Default project?", projects, pick(projects, defaults["project"]))
+    cats = data["projects"][project]["categories"]
+    category = select("Default entry type?", cats, pick(cats, defaults["category"]))
+    location = select("Default location?", data["locations"], pick(data["locations"], defaults["location"]))
+    sentiment = select("Default sentiment?", data["sentiments"], pick(data["sentiments"], defaults["sentiment"]))
+    return {"project": project, "category": category, "location": location, "sentiment": sentiment}
+
+
+def setup(existing=None):
+    existing = existing or {}
+    print(f"{BOLD}osheet setup{RESET} {DIM}(config: {CONFIG_PATH}){RESET}\n")
+
+    # Template
+    suggested = existing.get("template") or DEFAULT_TEMPLATE
+    while True:
+        raw = ask("Path to the timesheet template (.xlsx)?", suggested)
+        template = os.path.abspath(os.path.expanduser(raw.strip().strip("'\"")))
+        try:
+            data = parse_template(template)
+            break
+        except FileNotFoundError:
+            print(f"  {RED}File not found:{RESET} {template}")
+        except (zipfile.BadZipFile, KeyError, ValueError) as e:
+            print(f"  {RED}Couldn't read that template:{RESET} {e}")
+    n_cats = sum(len(p["categories"]) for p in data["projects"].values())
+    print(f"  {GREEN}Found {len(data['projects'])} projects, {n_cats} entry types{RESET}\n")
+
+    # Proposed defaults: keep previous choices where still valid
+    projects = list(data["projects"])
+    old = existing.get("defaults", {})
+    billable = [p for p in projects if data["projects"][p]["billable"] == "Yes"]
+    project = old.get("project") if old.get("project") in projects else (billable or projects)[0]
+    cats = data["projects"][project]["categories"]
+    defaults = {
+        "project": project,
+        "category": cats[pick(cats, old.get("category"), pick(cats, "Software Development"))],
+        "location": data["locations"][pick(data["locations"], old.get("location"),
+                                           pick(data["locations"], "Home"))],
+        "sentiment": data["sentiments"][pick(data["sentiments"], old.get("sentiment"),
+                                             pick(data["sentiments"], "Neutral"))],
+    }
+    output = existing.get("output", DEFAULT_OUTPUT)
+
+    while True:
+        print(f"{BOLD}Defaults:{RESET}")
+        print(f"  Project     {CYAN}{defaults['project']}{RESET}")
+        print(f"  Entry type  {CYAN}{defaults['category']}{RESET}")
+        print(f"  Location    {CYAN}{defaults['location']}{RESET}")
+        print(f"  Sentiment   {CYAN}{defaults['sentiment']}{RESET}")
+        print(f"  Save to     {CYAN}{output}{RESET}\n")
+        answer = select("Use these defaults?", ["Yes, save", "Change them"])
+        if answer.startswith("Yes"):
+            break
+        defaults = choose_defaults(data, defaults)
+        output = ask("Save entries to which CSV file?", output)
+        print()
+
+    cfg = {"template": template, "output": output, "defaults": defaults, **data}
+    save_config(cfg)
+    print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
+    return cfg
+
+
+# --- log entry -------------------------------------------------------------
+
+def log_entry(cfg):
+    defaults = cfg["defaults"]
+    today = dt.date.today()
+    monday = today - dt.timedelta(days=today.weekday())
+    days = [monday + dt.timedelta(days=i) for i in range(7)]
+    labels = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
+
+    # 1. Day
+    label = select("Which day is the timesheet for?", labels, default=today.weekday())
+    date = days[labels.index(label)]
+
+    # 2. Project + type of entry
+    projects = list(cfg["projects"])
+    project = select("Which project?", projects, pick(projects, defaults["project"]))
+    billable = cfg["projects"][project]["billable"]
+    categories = cfg["projects"][project]["categories"]
+    category = select("What type of entry is it?", categories, pick(categories, defaults["category"]))
+
+    # 3. Time, rounded up to the next 15 minutes
+    while True:
+        raw = ask("Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)")
+        minutes = parse_duration(raw) if raw else None
+        if minutes and 0 < minutes <= 24 * 60:
+            break
+        print("  Couldn't read that as a duration between 1 minute and 24 hours, try again.")
+    rounded = math.ceil(minutes / 15) * 15
+    hours, mins = divmod(rounded, 60)
+    note = f" {DIM}(rounded up from {minutes // 60}h{minutes % 60:02d}){RESET}" if rounded != minutes else ""
+    print(f"  {GREEN}{hours}h{mins:02d}{RESET}{note}")
+
+    # 4. Location
+    location = select("Where did you work from?", cfg["locations"], pick(cfg["locations"], defaults["location"]))
+
+    description = ask("Description? (optional)")
+
+    # 5. Store
+    values = {
+        "Date": date.isoformat(), "Project": project, "Category": category,
+        "Hours": hours, "Minutes": mins, "Billable": billable,
+        "Description": description, "TicketNumber": "", "Sentiment": defaults["sentiment"],
+        "WorkedFrom": location,
+    }
+    path = os.path.expanduser(os.environ.get("OSHEET_FILE") or cfg["output"])
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    new_file = not os.path.exists(path) or os.path.getsize(path) == 0
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cfg["columns"], extrasaction="ignore", restval="")
+        if new_file:
+            w.writeheader()
+        w.writerow(values)
+
+    print(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {project} / {category} · {hours}h{mins:02d} · {location}")
+    print(f"{DIM}  → {path}{RESET}")
+
+
+def main(argv):
+    if any(a in ("-h", "--help") for a in argv):
+        print(__doc__.strip())
+        return
+    cfg = load_config()
+    if "--setup" in argv:
+        setup(cfg)
+        return
+    if cfg is None:
+        print("No config found, let's set osheet up first.\n")
+        cfg = setup()
+    log_entry(cfg)
+
+
+if __name__ == "__main__":
+    try:
+        main(sys.argv[1:])
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelled, nothing saved.")
+        sys.exit(130)
