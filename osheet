@@ -4,6 +4,7 @@
 Usage:
     osheet            log an entry (runs setup instead if there is no config yet)
     osheet --setup    (re)run the configuration step
+    osheet --dir      copy the timesheet folder path to the clipboard
 """
 
 import csv
@@ -13,7 +14,10 @@ import math
 import os
 import posixpath
 import re
+import shutil
+import subprocess
 import sys
+import urllib.parse
 import xml.etree.ElementTree as ET
 import zipfile
 
@@ -299,6 +303,7 @@ def setup(existing=None):
     save_config(cfg)
     print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
     print(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
+    print(f"{DIM}Copy the timesheet folder path with: osheet --dir{RESET}")
     print(f"{DIM}Change these settings any time with: osheet --setup{RESET}")
 
 
@@ -346,7 +351,7 @@ def log_entry(cfg):
         "Description": description, "TicketNumber": "", "Sentiment": defaults["sentiment"],
         "WorkedFrom": location,
     }
-    path = os.path.expanduser(os.environ.get("OSHEET_FILE") or cfg["output"])
+    path = output_path(cfg)
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     new_file = not os.path.exists(path) or os.path.getsize(path) == 0
     with open(path, "a", newline="") as f:
@@ -359,6 +364,46 @@ def log_entry(cfg):
     print(f"{DIM}  → {path}{RESET}")
 
 
+def output_path(cfg):
+    return os.path.abspath(os.path.expanduser(os.environ.get("OSHEET_FILE") or cfg["output"]))
+
+
+def copy_to_clipboard(text):
+    """Copy text using the platform's clipboard tool. Returns the tool used, or None."""
+    if sys.platform == "darwin":
+        candidates = [["pbcopy"]]
+    elif sys.platform == "win32":
+        candidates = [["clip"]]
+    else:
+        candidates = []
+        if os.environ.get("WAYLAND_DISPLAY"):
+            candidates.append(["wl-copy"])
+        candidates += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for cmd in candidates:
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text.encode(), check=True, timeout=5,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return cmd[0]
+            except (OSError, subprocess.SubprocessError):
+                continue
+    return None
+
+
+def show_dir(cfg):
+    folder = os.path.dirname(output_path(cfg))
+    url = "file://" + urllib.parse.quote(folder.replace(os.sep, "/"))
+    # OSC 8 hyperlink: clickable in most modern terminals, plain text elsewhere
+    print(f"\033]8;;{url}\033\\{BOLD}{folder}{RESET}\033]8;;\033\\")
+    if not os.path.isdir(folder):
+        print(f"{DIM}  (doesn't exist yet; it's created when you log your first entry){RESET}")
+    tool = copy_to_clipboard(folder)
+    if tool:
+        print(f"{GREEN}✔ Copied to clipboard{RESET}")
+    else:
+        print(f"{DIM}  No clipboard tool found (install wl-clipboard, xclip or xsel); copy the path above.{RESET}")
+
+
 def main(argv):
     if any(a in ("-h", "--help") for a in argv):
         print(__doc__.strip())
@@ -368,6 +413,9 @@ def main(argv):
         if cfg is None:
             print("No config found, let's set osheet up first.\n")
         setup(cfg)
+        return
+    if "--dir" in argv:
+        show_dir(cfg)
         return
     log_entry(cfg)
 

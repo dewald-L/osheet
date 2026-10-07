@@ -51,3 +51,11 @@ Rows are appended to the CSV chosen during setup (default `~/timesheets/Timeshee
 Date,Project,Category,Hours,Minutes,Billable,Description,TicketNumber,Sentiment,WorkedFrom
 2026-10-06,Some Project,Meetings,2,15,Yes,standup,,Neutral,Home
 ```
+
+### Finding the file
+
+```bash
+osheet --dir
+```
+
+Prints the folder containing the timesheet CSV as a clickable link and copies the path to the clipboard (`wl-copy`, `xclip` or `xsel` on Linux, `pbcopy` on macOS, `clip` on Windows).
