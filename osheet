@@ -295,8 +295,10 @@ def ask_group_by(current="week"):
 def group_label(group_by, date):
     if group_by == "month":
         return f"{date:%Y-%m}"
-    year, week, _ = date.isocalendar()
-    return f"{year}-W{week:02d}"
+    # dd-dd_MM, e.g. 05-11_10 for Mon 5 – Sun 11 Oct (month of the Monday)
+    monday = date - dt.timedelta(days=date.weekday())
+    sunday = monday + dt.timedelta(days=6)
+    return f"{monday:%d}-{sunday:%d}_{monday:%m}"
 
 
 def output_path(cfg, date=None):

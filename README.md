@@ -49,7 +49,7 @@ Entries go into one Excel file per week or per month, depending on the grouping 
 
 | Grouping | Example file |
 |---|---|
-| Week (Mon–Sun, ISO week number) | `~/timesheets/TimesheetUpload_2026-W41.xlsx` |
+| Week (Mon–Sun, `dd-dd_MM`, month of the Monday) | `~/timesheets/TimesheetUpload_05-11_10.xlsx` |
 | Month | `~/timesheets/TimesheetUpload_2026-10.xlsx` |
 
 Set `OSHEET_FILE` to write a single run to one specific file instead. The file starts as a copy of your template, so the Lookup/Validation sheets, dropdowns and table are preserved; each entry becomes a new row in the `TimesheetEntry` table, with the date stored as a real Excel date.
