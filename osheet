@@ -5,6 +5,7 @@ Usage:
     osheet                log an entry (runs setup instead if there is no config yet)
     osheet -s, --setup    (re)run the configuration step
     osheet -e, --export   copy the timesheet folder path to the clipboard
+    osheet -E, --edit     change or delete an entry from the last five weeks
     osheet -H, --hours    show logged hours per category for today, this week or this month
                           (-d/--hours-day, -w/--hours-week, -m/--hours-month skip the question)
     osheet -h, --help     show this help
@@ -218,52 +219,47 @@ def date_style_index(files):
     return len(xfs)
 
 
-def append_rows(path, template, entries):
-    """Append entries (dicts keyed by column header) to the workbook at `path`,
-    creating it from `template` if it doesn't exist yet."""
+def load_workbook(path, template):
+    """(zip infos, {name: bytes}) for the workbook at `path`, or `template` if it doesn't exist yet."""
     src = path if os.path.exists(path) else template
     with zipfile.ZipFile(src) as z:
         infos = z.infolist()
-        files = {i.filename: z.read(i.filename) for i in infos}
+        return infos, {i.filename: z.read(i.filename) for i in infos}
 
-    sheet_path, table_paths = entry_sheet_parts(files)
-    sheet = ET.fromstring(files[sheet_path])
-    rows = list(sheet.iter(NS + "row"))
+
+def header_letters(files, header_row):
+    """{column header: column letter} from the entry sheet's first row."""
     letters = {}
-    for c in rows[0].iter(NS + "c"):
+    for c in header_row.iter(NS + "c"):
         v = c.find(NS + "v")
         if v is not None and c.get("t") == "s":
             text = ET.fromstring(files["xl/sharedStrings.xml"]).findall(NS + "si")[int(v.text)]
             letters["".join(t.text or "" for t in text.iter(NS + "t"))] = re.match(r"[A-Z]+", c.get("r")).group()
-    date_col = letters.get("Date", "A")
+    return letters
+
+
+def row_xml(files, letters, n, entry, cache, date_style):
+    """<row> element for `entry` (a dict keyed by column header) as row `n`."""
+    cells = []
+    for header, col in sorted(letters.items(), key=lambda kv: (len(kv[1]), kv[1])):
+        value = entry.get(header)
+        if value in (None, ""):
+            continue
+        ref = f"{col}{n}"
+        if isinstance(value, dt.date):
+            cells.append(f'<c r="{ref}" s="{date_style}"><v>{(value - EXCEL_EPOCH).days}</v></c>')
+        elif isinstance(value, (int, float)):
+            cells.append(f'<c r="{ref}" s="0"><v>{value}</v></c>')
+        else:
+            idx = shared_string_index(files, str(value), cache)
+            cells.append(f'<c r="{ref}" s="0" t="s"><v>{idx}</v></c>')
+    return f'<row r="{n}">{"".join(cells)}</row>'
+
+
+def save_workbook(path, infos, files, sheet_path, table_paths, xml, letters, end):
+    """Write the entry sheet `xml` with its data running to row `end`: updates the dimension,
+    data-validation ranges, table refs and shared string counts, then saves to `path`."""
     last_col = max(letters.values(), key=lambda s: (len(s), s))
-
-    xml = files[sheet_path].decode("utf-8")
-    last = int(rows[-1].get("r"))
-    # The template ships with a placeholder row 2 (defaults only, no date): replace it
-    if last == 2 and not any(re.match(rf"{date_col}2$", c.get("r")) for c in rows[-1].iter(NS + "c")):
-        xml = re.sub(r'<row r="2"[^>]*?(?:/>|>.*?</row>)', "", xml, flags=re.S)
-        last = 1
-
-    cache, date_style, new_rows = {}, date_style_index(files), []
-    for n, entry in enumerate(entries, start=last + 1):
-        cells = []
-        for header, col in sorted(letters.items(), key=lambda kv: (len(kv[1]), kv[1])):
-            value = entry.get(header)
-            if value in (None, ""):
-                continue
-            ref = f"{col}{n}"
-            if isinstance(value, dt.date):
-                cells.append(f'<c r="{ref}" s="{date_style}"><v>{(value - EXCEL_EPOCH).days}</v></c>')
-            elif isinstance(value, (int, float)):
-                cells.append(f'<c r="{ref}" s="0"><v>{value}</v></c>')
-            else:
-                idx = shared_string_index(files, str(value), cache)
-                cells.append(f'<c r="{ref}" s="0" t="s"><v>{idx}</v></c>')
-        new_rows.append(f'<row r="{n}">{"".join(cells)}</row>')
-    end = last + len(entries)
-
-    xml = xml.replace("</sheetData>", "".join(new_rows) + "</sheetData>")
     xml = re.sub(r'(<dimension ref=")[^"]*', rf"\g<1>A1:{last_col}{end}", xml)
     xml = re.sub(r'sqref="([A-Z]+)2:\1\d+"', rf'sqref="\g<1>2:\g<1>{end}"', xml)
     files[sheet_path] = xml.encode("utf-8")
@@ -283,6 +279,54 @@ def append_rows(path, template, entries):
         for info in infos:
             z.writestr(info, files[info.filename])
     os.replace(tmp, path)
+
+
+def append_rows(path, template, entries):
+    """Append entries (dicts keyed by column header) to the workbook at `path`,
+    creating it from `template` if it doesn't exist yet."""
+    infos, files = load_workbook(path, template)
+    sheet_path, table_paths = entry_sheet_parts(files)
+    rows = list(ET.fromstring(files[sheet_path]).iter(NS + "row"))
+    letters = header_letters(files, rows[0])
+    date_col = letters.get("Date", "A")
+
+    xml = files[sheet_path].decode("utf-8")
+    last = int(rows[-1].get("r"))
+    # The template ships with a placeholder row 2 (defaults only, no date): replace it
+    if last == 2 and not any(re.match(rf"{date_col}2$", c.get("r")) for c in rows[-1].iter(NS + "c")):
+        xml = re.sub(r'<row r="2"[^>]*?(?:/>|>.*?</row>)', "", xml, flags=re.S)
+        last = 1
+
+    cache, date_style = {}, date_style_index(files)
+    new_rows = [row_xml(files, letters, n, entry, cache, date_style)
+                for n, entry in enumerate(entries, start=last + 1)]
+    xml = xml.replace("</sheetData>", "".join(new_rows) + "</sheetData>")
+    save_workbook(path, infos, files, sheet_path, table_paths, xml, letters, last + len(entries))
+
+
+def update_row(path, template, index, entry=None):
+    """Replace the entry at `index` (its `_row` from read_entries) with `entry`, or delete it
+    when `entry` is None; the rows below it move up."""
+    infos, files = load_workbook(path, template)
+    sheet_path, table_paths = entry_sheet_parts(files)
+    rows = list(ET.fromstring(files[sheet_path]).iter(NS + "row"))
+    letters = header_letters(files, rows[0])
+    n, last = int(rows[index].get("r")), int(rows[-1].get("r"))
+
+    xml = files[sheet_path].decode("utf-8")
+    pattern = rf'<row r="{n}"[^>]*?(?:/>|>.*?</row>)'
+    if entry is not None:
+        new = row_xml(files, letters, n, entry, {}, date_style_index(files))
+        xml = re.sub(pattern, lambda m: new, xml, count=1, flags=re.S)
+    elif len(rows) <= 2:
+        # It was the only entry: back to a fresh copy of the template (a table needs a data row)
+        shutil.copyfile(template, path)
+        return
+    else:
+        xml = re.sub(pattern, "", xml, count=1, flags=re.S)
+        xml = re.sub(r'(<row r="|<c r="[A-Z]+)(\d+)"', lambda m: f'{m[1]}{int(m[2]) - (int(m[2]) > n)}"', xml)
+        last -= 1
+    save_workbook(path, infos, files, sheet_path, table_paths, xml, letters, last)
 
 
 GROUP_OPTIONS = {
@@ -342,13 +386,14 @@ def read_entries(path):
     rows = next(r for name, r in sheets.items() if name not in ("Lookup", "Validation"))
     headers = rows[0]
     entries = []
-    for row in rows[1:]:
+    for i, row in enumerate(rows[1:], start=1):
         e = {headers[col]: val for col, val in row.items() if col in headers}
         if not e.get("Date"):
             continue
         e["Date"] = EXCEL_EPOCH + dt.timedelta(days=int(float(e["Date"])))
         for k in ("Hours", "Minutes"):
             e[k] = int(float(e.get(k) or 0))
+        e["_row"] = i  # position in the sheet's rows, for update_row
         entries.append(e)
     return entries
 
@@ -940,24 +985,27 @@ def check_description(raw):
     return raw
 
 
-def log_entry(cfg):
+def week_of(date):
+    monday = date - dt.timedelta(days=date.weekday())
+    return [monday + dt.timedelta(days=i) for i in range(7)]
+
+
+def entry_steps(cfg, form, st, asking):
+    """Form steps for the entry questions, answered into `st`. The day is picked from
+    `st["days"]`; answers already in `st` are pre-selected."""
     defaults = cfg["defaults"]
     today = dt.date.today()
-    monday = today - dt.timedelta(days=today.weekday())
-    days = [monday + dt.timedelta(days=i) for i in range(7)]
-    labels = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
-
     projects = list(cfg["projects"])
-    asking = ask_flags(cfg)
-    st = {}
 
     def day():
         if not asking["day"]:
             st["date"] = today
             form.set("day", f"{today:%A %d %b}", SKIPPED)
             return SKIP
+        days = st["days"]
+        labels = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
         label = form.select("day", "Which day is the timesheet for?", labels,
-                            pick(days, st.get("date"), today.weekday()))
+                            pick(days, st.get("date"), pick(days, today)))
         st["date"] = days[labels.index(label)]
         form.set("day", f"{st['date']:%A %d %b}")
 
@@ -1014,29 +1062,120 @@ def log_entry(cfg):
         st["description"] = form.ask("description", "Description? (max 255 characters)",
                                      st.get("description", ""), check=check_description)
 
-    with Form(ENTRY_FIELDS) as form:
-        form.run([day, project, category, time, location, description])
+    return [day, project, category, time, location, description]
 
-    # Store
-    date, hours, mins = st["date"], st["hours"], st["mins"]
-    values = {
-        "Date": date, "Project": st["project"], "Category": st["category"],
-        "Hours": hours, "Minutes": mins, "Billable": cfg["projects"][st["project"]]["billable"],
-        "Description": st["description"], "TicketNumber": "", "Sentiment": defaults["sentiment"],
+
+def entry_values(cfg, st, sentiment, ticket=""):
+    """Row values (keyed by column header) for the answers in `st`."""
+    return {
+        "Date": st["date"], "Project": st["project"], "Category": st["category"],
+        "Hours": st["hours"], "Minutes": st["mins"], "Billable": cfg["projects"][st["project"]]["billable"],
+        "Description": st["description"], "TicketNumber": ticket, "Sentiment": sentiment,
         "WorkedFrom": st["location"],
     }
-    path, = save_entries(cfg, [values])
 
-    say(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {st['project']} / {st['category']} · "
-          f"{hours}h{mins:02d} · {st['location']}")
+
+def entry_summary(date, project, category, hours, mins, location):
+    return f"{date:%a %d %b} · {project} / {category} · {hours}h{mins:02d} · {location}"
+
+
+def log_entry(cfg):
+    st = {"days": week_of(dt.date.today())}
+    with Form(ENTRY_FIELDS) as form:
+        form.run(entry_steps(cfg, form, st, ask_flags(cfg)))
+
+    # Store
+    path, = save_entries(cfg, [entry_values(cfg, st, cfg["defaults"]["sentiment"])])
+
+    say(f"\n{GREEN}✔ Saved{RESET} " + entry_summary(st["date"], st["project"], st["category"],
+                                                    st["hours"], st["mins"], st["location"]))
+    say(f"{DIM}  → {path}{RESET}")
+
+
+# --- edit entries ----------------------------------------------------------
+
+EDIT_WEEKS = 5  # entries from this week and the four before it can be edited
+
+
+def recent_entries(cfg):
+    """(path, entry) for entries from the last EDIT_WEEKS weeks, newest first."""
+    today = dt.date.today()
+    start = today - dt.timedelta(days=today.weekday() + 7 * (EDIT_WEEKS - 1))
+    end = week_of(today)[-1]
+    found = []
+    dates = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
+    for path in dict.fromkeys(output_path(cfg, d) for d in dates):
+        if os.path.exists(path):
+            found += [(path, e) for e in read_entries(path) if start <= e["Date"] <= end]
+    return sorted(found, key=lambda pe: (pe[1]["Date"], pe[1]["_row"]), reverse=True)
+
+
+def edit_entry(cfg):
+    """Pick a recent entry, then change its answers or delete it."""
+    found = recent_entries(cfg)
+    if not found:
+        say(f"{DIM}No entries logged in the last {EDIT_WEEKS} weeks.{RESET}")
+        return
+    labels = []
+    for _, e in found:
+        desc = e.get("Description", "")
+        desc = desc if len(desc) <= 40 else desc[:39] + "…"
+        labels.append(f"{e['Date']:%a %d %b} · {e.get('Project', '?')} / {e.get('Category', '?')} · "
+                      f"{e['Hours']}h{e['Minutes']:02d} · {desc}")
+        while labels.count(labels[-1]) > 1:  # menus return the label, so keep them unique
+            labels[-1] += " ·"
+    st = {}
+
+    def choose():
+        label = form.select(None, "Which entry?", labels, labels.index(st["label"]) if "label" in st else 0)
+        path, e = found[labels.index(label)]
+        st.clear()
+        st.update(label=label, path=path, entry=e, days=week_of(e["Date"]), date=e["Date"],
+                  project=e.get("Project", ""), category=e.get("Category", ""),
+                  time=f"{e['Hours']}h{e['Minutes']:02d}", location=e.get("WorkedFrom", ""),
+                  description=e.get("Description", ""))
+        for key, value in (("day", f"{e['Date']:%A %d %b}"), ("project", st["project"]),
+                           ("category", st["category"]), ("time", st["time"]),
+                           ("location", st["location"]), ("description", st["description"])):
+            form.set(key, value)
+
+    def action():
+        st["delete"] = False
+        if form.select(None, "Change or delete this entry?", ["Change it", "Delete it"]) == "Change it":
+            return None
+        if form.select(None, "Delete this entry?", ["No, keep it", "Yes, delete it"]).startswith("No"):
+            return steps.index(action)
+        st["delete"] = True
+        return len(steps)
+
+    with Form(ENTRY_FIELDS) as form:
+        steps = [choose, action] + entry_steps(cfg, form, st, {key: True for key, _ in ASK_FIELDS})
+        form.run(steps)
+
+    path, e = st["path"], st["entry"]
+    template = template_path(cfg)
+    if st["delete"]:
+        update_row(path, template, e["_row"])
+        say(f"\n{GREEN}✔ Deleted{RESET} " + entry_summary(e["Date"], e.get("Project", "?"), e.get("Category", "?"),
+                                                        e["Hours"], e["Minutes"], e.get("WorkedFrom", "?")))
+        say(f"{DIM}  from {path}{RESET}")
+        return
+    values = entry_values(cfg, st, e.get("Sentiment", cfg["defaults"]["sentiment"]), e.get("TicketNumber", ""))
+    if output_path(cfg, st["date"]) == path:
+        update_row(path, template, e["_row"], values)
+    else:  # the new day belongs in another week's/month's file
+        update_row(path, template, e["_row"])
+        path, = save_entries(cfg, [values])
+    say(f"\n{GREEN}✔ Updated{RESET} " + entry_summary(st["date"], st["project"], st["category"],
+                                                      st["hours"], st["mins"], st["location"]))
     say(f"{DIM}  → {path}{RESET}")
 
 
 # --- hours summary ---------------------------------------------------------
 
 HOURS_FLAGS = {"--hours-day": "day", "--hours-week": "week", "--hours-month": "month"}
-KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--hours", *HOURS_FLAGS}
-SHORT_FLAGS = {"-s": "--setup", "-e": "--export", "-H": "--hours",
+KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--edit", "--hours", *HOURS_FLAGS}
+SHORT_FLAGS = {"-s": "--setup", "-e": "--export", "-E": "--edit", "-H": "--hours",
                "-d": "--hours-day", "-w": "--hours-week", "-m": "--hours-month"}
 
 
@@ -1202,6 +1341,9 @@ def main(argv):
         return
     if "--export" in argv:
         show_dir(cfg)
+        return
+    if "--edit" in argv:
+        edit_entry(cfg)
         return
     if "--hours" in argv or any(a in HOURS_FLAGS for a in argv):
         show_hours(cfg, next((HOURS_FLAGS[a] for a in argv if a in HOURS_FLAGS), None))

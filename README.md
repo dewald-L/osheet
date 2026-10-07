@@ -69,7 +69,6 @@ Each question has an `ask_every_time` flag in the config file (all `true` by def
 | `time` | `defaults.time` (e.g. `"time": "1h"`); still asked if that isn't set |
 | `description` | `defaults.description`; still asked if that isn't set or is over 255 characters |
 Skipped answers still show in the panel, marked `(skipped)`, and Back passes over them.
-Skipped answers still show in the panel, and Back passes over them.
 
 ## Output
 
@@ -85,6 +84,14 @@ Set `OSHEET_FILE` to write a single run to one specific file instead. The file s
 Only the folder is configurable; files are named after their week or month. They are stored in a `<yyyy_Month>` folder per month (e.g. `2026_October`); a week that spans two months is filed under the month its Monday falls in. A new file is created from the template whenever an entry falls in a new week or month.
 
 Upgrading from an earlier version: osheet asks once how to group files, then moves entries from the old CSV or single Excel file into the grouped files and keeps the old file as `.bak`. Files from earlier versions named `<name>_<period>.xlsx` (or with the old `dd-dd_MM` week label) are renamed to the current names on the next run.
+
+### Editing entries
+
+```bash
+osheet --edit     # or -E
+```
+
+Lists the entries from this week and the four before it, newest first, then asks whether to change or delete the one you pick. Changing it asks every question again (none are skipped), with the entry's current answers as the defaults, so press Enter to keep a value. The day can be moved within the entry's own week; the row is updated in place, or moved to another file if the new day belongs to a different week or month. Deleting asks for confirmation first, and the rows below move up. The sentiment and ticket number are kept as they were.
 
 ### Hours summary
 
