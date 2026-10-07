@@ -39,11 +39,35 @@ Prompts for:
 3. **Entry type** (category), filtered by project; Billable is set from the project
 4. **Total time**: `1:20`, `1h20`, `80m`, `1.5` or `90`; rounded **up** to the next 15 minutes
 5. **Location** (WorkedFrom), using the options from the template
-6. **Description** (optional)
+6. **Description**: required, up to 255 characters
 
-Answers fill in a panel at the top (`Day`, `Project`, `Entry type`, `Time`, `Location`, `Description`) that updates in place, with the current question shown below it; when you're done, only the completed panel and the saved file path stay in the terminal. Setup works the same way for the template and defaults. Without a TTY (piped input) the questions and answers are printed as plain lines instead.
+Answers fill in a panel at the top (`Day`, `Project`, `Entry type`, `Time`, `Location`, `Description`) that updates in place, with the current question shown below it; when you're done, only the completed panel and the saved file path stay in the terminal. Setup works the same way for the template and defaults. Text that doesn't fit the terminal's width wraps onto the next line (the panel, questions, menus, messages and the `--hours` table). Without a TTY (piped input) the questions and answers are printed as plain lines instead.
 
 In menus: ↑/↓ or `j`/`k` to move, Enter or an option's number to select, type to filter. Choose `0. ← Back` (or type `<` and Enter at a text question) to go back to the previous question.
+
+### Skipping questions
+
+Each question has an `ask_every_time` flag in the config file (all `true` by default). Set one to `false` to skip that question and use its default instead:
+
+```json
+"ask_every_time": {
+  "day": false,
+  "project": true,
+  "category": false,
+  "time": true,
+  "location": false,
+  "description": false
+}
+```
+
+| Question | Default used when skipped |
+|---|---|
+| `day` | today |
+| `project`, `category`, `location` | the value in `defaults` (still asked if it isn't valid, e.g. the entry type doesn't belong to the chosen project) |
+| `time` | `defaults.time` (e.g. `"time": "1h"`); still asked if that isn't set |
+| `description` | `defaults.description`; still asked if that isn't set or is over 255 characters |
+
+Skipped answers still show in the panel, and Back passes over them.
 
 ## Output
 

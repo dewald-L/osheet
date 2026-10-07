@@ -361,7 +361,7 @@ def migrate_ungrouped(cfg):
     paths = save_entries(cfg, entries)
     os.replace(old, old + ".bak")
     where = ", ".join(os.path.basename(p) for p in paths) or "nowhere (it was empty)"
-    print(f"{DIM}Moved {len(entries)} entries from {os.path.basename(old)} into {where} "
+    say(f"{DIM}Moved {len(entries)} entries from {os.path.basename(old)} into {where} "
           f"(old file kept as {os.path.basename(old)}.bak){RESET}\n")
 
 
@@ -381,7 +381,7 @@ def migrate_csv(cfg):
         paths = save_entries(cfg, entries)
         os.replace(old, old + ".bak")
         where = ", ".join(paths) or "nowhere (it was empty)"
-        print(f"{DIM}Moved {len(entries)} entries from {old} → {where} (old file kept as .csv.bak){RESET}\n")
+        say(f"{DIM}Moved {len(entries)} entries from {old} → {where} (old file kept as .csv.bak){RESET}\n")
     save_config(cfg)
     return cfg
 
@@ -470,23 +470,65 @@ def ask(question, default=""):
 ANSI_RE = re.compile(r"\033\[[0-9;?]*[A-Za-z]")
 
 
-def fit(line, width):
-    """Cut `line` to `width` visible characters, skipping over ANSI codes."""
-    out, n = [], 0
+def wrap(line, width, indent=None, hard=True):
+    """Word-wrap `line` to `width` visible characters, keeping its ANSI styles across the breaks.
+    Continuation lines are indented by `indent`; by default to the text after a leading marker
+    (`? `, `❯ `, `3. `, `[x] `). Words longer than a line are split when `hard`, else left whole."""
+    chars, style = [], ""
     for part in re.split(f"({ANSI_RE.pattern})", line):
         if ANSI_RE.fullmatch(part):
-            out.append(part)
-        elif n + len(part) > width:
-            out.append(part[:max(0, width - n - 1)] + "…" + RESET)
-            break
+            style = "" if part == RESET else style + part
         else:
-            out.append(part)
-            n += len(part)
-    return "".join(out)
+            chars += [(c, style) for c in part]
+    text = "".join(c for c, _ in chars)
+    if len(text) <= width:
+        return [line]
+    if indent is None:
+        indent = len(re.match(r"\s*(?:[?❯>]\s+)?(?:\d+\.\s+)?(?:\[.\]\s+)?", text)[0])
+    indent = indent if width - indent >= 12 else 0
+    spans, start, room = [], 0, width
+    while len(text) - start > room:
+        cut = text.rfind(" ", max(start, indent) + 1, start + room + 1)  # not inside the label/marker
+        if cut <= start:
+            cut = start + room if hard else text.find(" ", start + room)
+            if cut == -1:
+                break
+        if not hard:  # a word too long for a whole line stays where it is, the terminal wraps it
+            nxt = len(text) - len(text[cut:].lstrip(" "))
+            end = text.find(" ", nxt)
+            if (len(text) if end == -1 else end) - nxt > width - indent:
+                break
+        spans.append((start, cut))
+        start = cut
+        while start < len(text) and text[start] == " ":
+            start += 1
+        room = width - indent
+    spans.append((start, len(text)))
+    out = []
+    for n, (a, b) in enumerate(spans):
+        piece, cur = " " * indent if n else "", ""
+        for c, st in chars[a:b]:
+            if st != cur:
+                piece += RESET + st if cur else st
+                cur = st
+            piece += c
+        out.append(piece + (RESET if cur else ""))
+    return out
+
+
+def say(text=""):
+    """print(), word-wrapped to the terminal's width when printing to one."""
+    if sys.stdout.isatty():
+        cols = shutil.get_terminal_size().columns
+        text = "\n".join(p for line in text.split("\n") for p in wrap(line, cols - 1, hard=False))
+    print(text)
 
 
 class Back(Exception):
     """Raised by a Form question when the user chooses to go back."""
+
+
+SKIP = object()  # returned by a step that answered itself without asking; Back passes over it
 
 
 class Form:
@@ -512,7 +554,7 @@ class Form:
 
     def run(self, steps):
         """Run question steps in order. Going back from a question re-runs the step before it;
-        a step may return the index of the step to run next."""
+        a step may return the index of the step to run next, or SKIP."""
         i, history = 0, []
         while i < len(steps):
             self.can_back = self.live and bool(history)
@@ -520,6 +562,9 @@ class Form:
                 nxt = steps[i]()
             except Back:
                 i = history.pop()
+                continue
+            if nxt is SKIP:
+                i += 1
                 continue
             history.append(i)
             i = i + 1 if nxt is None else nxt
@@ -544,20 +589,24 @@ class Form:
                 row = f"{CYAN}❯ {label:<{label_w}}  {BOLD}{value}{RESET}"
             else:
                 row = f"  {DIM}{label:<{label_w}}{RESET}  {BOLD}{value}{RESET}"
-            row = fit(row, inner)
-            row += " " * (inner - len(ANSI_RE.sub("", row)))
-            lines.append(f"{DIM}│{RESET} {row} {DIM}│{RESET}")
+            for piece in wrap(row, inner, indent=label_w + 4):
+                piece += " " * (inner - len(ANSI_RE.sub("", piece)))
+                lines.append(f"{DIM}│{RESET} {piece} {DIM}│{RESET}")
         lines.append(f"{DIM}╰{'─' * (width - 2)}╯{RESET}")
         return lines
+
+    @staticmethod
+    def width():
+        return max(20, min(shutil.get_terminal_size().columns - 1, 80))
 
     def redraw(self, question=()):
         """Redraw the panel plus `question` lines over what was drawn before."""
         cols = shutil.get_terminal_size().columns
-        width = max(20, min(cols - 1, 80))
         gap = [""] if self.fields and question else []
-        lines = self.render(width) + gap + list(question)
+        lines = [piece for line in self.render(self.width()) + gap + list(question)
+                 for piece in wrap(line, cols - 1)]
         up = f"\033[{self.drawn}A" if self.drawn else ""
-        sys.stdout.write("\r" + up + "".join(f"\033[2K{fit(line, cols - 1)}\n" for line in lines) + "\033[J")
+        sys.stdout.write("\r" + up + "".join(f"\033[2K{line}\n" for line in lines) + "\033[J")
         sys.stdout.flush()
         self.drawn = len(lines)
 
@@ -568,7 +617,9 @@ class Form:
         else:
             self.active = key
             header = f"{BOLD}{MAGENTA}? {question}{RESET}"
-            room = shutil.get_terminal_size().lines - len(self.fields) - 8 - self.can_back
+            size = shutil.get_terminal_size()
+            room = (size.lines - len(self.render(self.width())) - 6 - self.can_back
+                    - (len(wrap(header, size.columns - 1)) - 1))
             fd = sys.stdin.fileno()
             old = termios.tcgetattr(fd)
             tty.setcbreak(fd)
@@ -644,30 +695,32 @@ def load_template(raw):
 
 
 SETUP_FIELDS = [("template", "Template"), ("project", "Project"), ("category", "Entry type"),
-                ("location", "Location"), ("sentiment", "Sentiment"), ("group_by", "Group files"),
+                ("location", "Location"), ("sentiment", "Sentiment"), ("ask", "Ask every time"),
+                ("group_by", "Group files"),
                 ("output", "Save to")]
 
 
 def setup(existing=None):
     existing = existing or {}
-    print(f"{BOLD}osheet setup{RESET} {DIM}(config: {CONFIG_PATH}){RESET}\n")
+    say(f"{BOLD}osheet setup{RESET} {DIM}(config: {CONFIG_PATH}){RESET}\n")
     with Form(SETUP_FIELDS) as form:
         st = _setup_form(form, existing)
 
     store_template(st["template"])
     cfg = {"template": st["template"], "output": st["output"], "group_by": st["group_by"],
-           "defaults": st["defaults"], **st["data"]}
+           "defaults": st["defaults"], "ask_every_time": st["ask"], **st["data"]}
     save_config(cfg)
     if form.live:
         print()
-    print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
-    print(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
-    print(f"{DIM}Copy the timesheet folder path with: osheet --export{RESET}")
-    print(f"{DIM}Change these settings any time with: osheet --setup{RESET}")
+    say(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
+    say(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
+    say(f"{DIM}Copy the timesheet folder path with: osheet --export{RESET}")
+    say(f"{DIM}Change these settings any time with: osheet --setup{RESET}")
 
 
 def _setup_form(form, existing):
-    st = {"output": existing.get("output", DEFAULT_OUTPUT), "group_by": existing.get("group_by", "week")}
+    st = {"output": existing.get("output", DEFAULT_OUTPUT), "group_by": existing.get("group_by", "week"),
+          "ask": ask_flags(existing)}
 
     def template():
         suggested = st.get("template") or existing.get("template") or DEFAULT_TEMPLATE
@@ -694,12 +747,15 @@ def _setup_form(form, existing):
             "sentiment": data["sentiments"][pick(data["sentiments"], old.get("sentiment"),
                                                  pick(data["sentiments"], "Neutral"))],
         }
+        if old.get("time"):
+            st["defaults"]["time"] = old["time"]
 
     def confirm():
         defaults, group_by = st["defaults"], st["group_by"]
         example = grouped_path(st["output"], group_by, dt.date.today())
         for key in ("project", "category", "location", "sentiment"):
             form.set(key, defaults[key])
+        form.set("ask", ask_summary(st["ask"], defaults))
         form.set("group_by", f"by {group_by}")
         form.set("output", example, "(e.g.)")
         if not form.live:
@@ -708,6 +764,7 @@ def _setup_form(form, existing):
             print(f"  Entry type  {CYAN}{defaults['category']}{RESET}")
             print(f"  Location    {CYAN}{defaults['location']}{RESET}")
             print(f"  Sentiment   {CYAN}{defaults['sentiment']}{RESET}")
+            print(f"  Ask         {CYAN}{ask_summary(st['ask'], defaults)}{RESET}")
             print(f"  Group files {CYAN}by {group_by}{RESET}")
             print(f"  Save to     {CYAN}{example}{RESET} {DIM}(e.g.){RESET}\n")
         answer = form.select(None, "Use these defaults?", ["Yes, save", "Change them"])
@@ -717,6 +774,28 @@ def _setup_form(form, existing):
         def step():
             st["defaults"][key] = form.select(key, question, options(), pick(options(), st["defaults"][key]))
         return step
+
+    def ask_every_time():
+        asking = st["ask"]
+        options = lambda: [f"[{'x' if asking[key] else ' '}] {label}" for key, label in ASK_FIELDS] + ["Done"]
+        idx = len(ASK_FIELDS)
+        while True:
+            form.set("ask", ask_summary(asking, st["defaults"]))
+            choice = form.select("ask", "Which questions should be asked every time? "
+                                        "(pick one to tick/untick; unticked ones use the default)", options(), idx)
+            idx = options().index(choice)
+            if choice == "Done":
+                break
+            key = ASK_FIELDS[idx][0]
+            asking[key] = not asking[key]
+        if not asking["time"]:
+            # Time has no default otherwise
+            def check(raw):
+                check_duration(raw)
+                return raw
+            st["defaults"]["time"] = form.ask("ask", "Default time when it isn't asked? (e.g. 1h, 1:30)",
+                                              st["defaults"].get("time", ""), check=check)
+        form.set("ask", ask_summary(asking, st["defaults"]))
 
     def group_by():
         st["group_by"] = ask_group_by(form, st["group_by"])
@@ -736,7 +815,7 @@ def _setup_form(form, existing):
                    lambda: data()["projects"][st["defaults"]["project"]]["categories"]),
         default_of("location", "Default location?", lambda: data()["locations"]),
         default_of("sentiment", "Default sentiment?", lambda: data()["sentiments"]),
-        group_by, output,
+        ask_every_time, group_by, output,
     ]
     form.run(steps)
     return st
@@ -748,11 +827,35 @@ ENTRY_FIELDS = [("day", "Day"), ("project", "Project"), ("category", "Entry type
                 ("time", "Time"), ("location", "Location"), ("description", "Description")]
 
 
+# Questions that can be skipped; the description is always asked
+ASK_FIELDS = [(key, label) for key, label in ENTRY_FIELDS if key != "description"]
+
+
+def ask_flags(cfg):
+    """`ask_every_time` per entry question; a question set to false is answered with its default."""
+    flags = cfg.get("ask_every_time", {})
+    return {key: flags.get(key, True) is not False for key, _ in ASK_FIELDS}
+
+
+def ask_summary(asking, defaults):
+    skipped = [label + (f" ({defaults.get('time')})" if key == "time" else "")
+               for key, label in ASK_FIELDS if not asking[key]]
+    return f"all but {', '.join(skipped)}" if skipped else "all questions"
+
+
 def check_duration(raw):
     minutes = parse_duration(raw) if raw else None
     if not (minutes and 0 < minutes <= 24 * 60):
         raise ValueError("Couldn't read that as a duration between 1 minute and 24 hours, try again.")
     return minutes
+
+
+def check_description(raw):
+    if not raw:
+        raise ValueError("A description is required.")
+    if len(raw) > 255:
+        raise ValueError(f"Too long ({len(raw)} characters), keep it to 255.")
+    return raw
 
 
 def log_entry(cfg):
@@ -763,42 +866,70 @@ def log_entry(cfg):
     labels = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
 
     projects = list(cfg["projects"])
+    asking = ask_flags(cfg)
     st = {}
 
     def day():
+        if not asking["day"]:
+            st["date"] = today
+            form.set("day", f"{today:%A %d %b}")
+            return SKIP
         label = form.select("day", "Which day is the timesheet for?", labels,
                             pick(days, st.get("date"), today.weekday()))
         st["date"] = days[labels.index(label)]
         form.set("day", f"{st['date']:%A %d %b}")
 
     def project():
+        if not asking["project"] and defaults["project"] in projects:
+            st["project"] = defaults["project"]
+            form.set("project", st["project"])
+            return SKIP
         st["project"] = form.select("project", "Which project?", projects,
                                     pick(projects, st.get("project"), pick(projects, defaults["project"])))
 
     def category():
         cats = cfg["projects"][st["project"]]["categories"]
+        if not asking["category"] and defaults["category"] in cats:
+            st["category"] = defaults["category"]
+            form.set("category", st["category"])
+            return SKIP
         st["category"] = form.select("category", "What type of entry is it?", cats,
                                      pick(cats, st.get("category"), pick(cats, defaults["category"])))
 
     def time():
         # Rounded up to the next 15 minutes
-        minutes = form.ask("time", "Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)", st.get("time", ""),
-                           check=check_duration)
+        minutes = None
+        if not asking["time"]:
+            try:
+                minutes = check_duration(str(defaults.get("time", "")))
+            except ValueError:  # no usable default time: ask anyway
+                pass
+        skipped = minutes is not None
+        if not skipped:
+            minutes = form.ask("time", "Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)", st.get("time", ""),
+                               check=check_duration)
         rounded = math.ceil(minutes / 15) * 15
         st["hours"], st["mins"] = divmod(rounded, 60)
         st["time"] = f"{st['hours']}h{st['mins']:02d}"
         note = f"(rounded up from {minutes // 60}h{minutes % 60:02d})" if rounded != minutes else ""
         form.set("time", st["time"], note)
+        if skipped:
+            return SKIP
         if not form.live:
             print(f"  {GREEN}{st['time']}{RESET}{f' {DIM}{note}{RESET}' if note else ''}")
 
     def location():
+        if not asking["location"] and defaults["location"] in cfg["locations"]:
+            st["location"] = defaults["location"]
+            form.set("location", st["location"])
+            return SKIP
         st["location"] = form.select("location", "Where did you work from?", cfg["locations"],
                                      pick(cfg["locations"], st.get("location"),
                                           pick(cfg["locations"], defaults["location"])))
 
     def description():
-        st["description"] = form.ask("description", "Description? (optional)", st.get("description", ""))
+        st["description"] = form.ask("description", "Description? (max 255 characters)",
+                                     st.get("description", ""), check=check_description)
 
     with Form(ENTRY_FIELDS) as form:
         form.run([day, project, category, time, location, description])
@@ -813,9 +944,9 @@ def log_entry(cfg):
     }
     path, = save_entries(cfg, [values])
 
-    print(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {st['project']} / {st['category']} · "
+    say(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {st['project']} / {st['category']} · "
           f"{hours}h{mins:02d} · {st['location']}")
-    print(f"{DIM}  → {path}{RESET}")
+    say(f"{DIM}  → {path}{RESET}")
 
 
 # --- hours summary ---------------------------------------------------------
@@ -833,7 +964,7 @@ def show_hours(cfg, period=None):
         choices = {"Today": "day", "This week": "week", "This month": "month"}
         with Form([]) as form:
             period = choices[form.select(None, "Show hours for?", list(choices))]
-        print(f"{DIM}Tip: osheet --hours-day, --hours-week or --hours-month skips this question{RESET}\n")
+        say(f"{DIM}Tip: osheet --hours-day, --hours-week or --hours-month skips this question{RESET}\n")
 
     today = dt.date.today()
     if period == "day":
@@ -861,8 +992,8 @@ def show_hours(cfg, period=None):
                 cats[cat] = cats.get(cat, 0) + e["Hours"] * 60 + e["Minutes"]
 
     if not totals:
-        print(f"{BOLD}{title} {DIM}{span}{RESET}\n")
-        print(f"{DIM}  No entries logged {'today' if period == 'day' else 'this ' + period} yet.{RESET}")
+        say(f"{BOLD}{title} {DIM}{span}{RESET}\n")
+        say(f"{DIM}  No entries logged {'today' if period == 'day' else 'this ' + period} yet.{RESET}")
         return
     # Boxed table: one group per project (busiest first), with a subtotal when it has several categories
     groups = []
@@ -877,25 +1008,38 @@ def show_hours(cfg, period=None):
     widths = [max(len(r[i]) for g in groups + [[header, total]] for r in g) for i in range(3)]
     heading = f"{title} {span}"
     widths[1] += max(0, len(heading) - (sum(widths) + 6))  # widen so the heading row fits
+    if sys.stdout.isatty():
+        # Too wide for the terminal: narrow the widest text column, its cells wrap
+        over = sum(widths) + 12 - (shutil.get_terminal_size().columns - 1)
+        while over > 0 and max(widths[:2]) > 4:
+            widths[widths[1] > widths[0]] -= 1
+            over -= 1
 
     def rule(left, mid, right):
         return f"  {DIM}{left}{mid.join('─' * (w + 2) for w in widths)}{right}{RESET}"
 
     def line(project, cat, time, style):
+        """Table row; cells too long for their column wrap onto extra lines."""
         bar = f"{DIM}│{RESET}"
-        cells = [f"{project:<{widths[0]}}", f"{cat:<{widths[1]}}", f"{time:>{widths[2]}}"]
-        if style and not project:  # subtotal: highlight only the category and time
-            cells[1:] = [f"{style}{c}{RESET}" for c in cells[1:]]
-        elif style:
-            cells = [f"{style}{c}{RESET}" for c in cells]
-        elif project:
-            cells[0] = f"{BOLD}{cells[0]}{RESET}"
-        return f"  {bar} " + f" {bar} ".join(cells) + f" {bar}"
+        cols = [wrap(text, w, indent=0) for text, w in zip((project, cat, time), widths)]
+        out = []
+        for i in range(max(map(len, cols))):
+            part = [c[i] if i < len(c) else "" for c in cols]
+            cells = [f"{part[0]:<{widths[0]}}", f"{part[1]:<{widths[1]}}", f"{part[2]:>{widths[2]}}"]
+            if style and not project:  # subtotal: highlight only the category and time
+                cells[1:] = [f"{style}{c}{RESET}" for c in cells[1:]]
+            elif style:
+                cells = [f"{style}{c}{RESET}" for c in cells]
+            elif project:
+                cells[0] = f"{BOLD}{cells[0]}{RESET}"
+            out.append(f"  {bar} " + f" {bar} ".join(cells) + f" {bar}")
+        return "\n".join(out)
 
     inner = sum(widths) + 6
     print(f"  {DIM}╭{'─' * (inner + 2)}╮{RESET}")
-    pad = inner - len(heading)
-    print(f"  {DIM}│{RESET} {' ' * (pad // 2)}{BOLD}{title}{RESET} {DIM}{span}{RESET}{' ' * (pad - pad // 2)} {DIM}│{RESET}")
+    for part in wrap(f"{BOLD}{title}{RESET} {DIM}{span}{RESET}", inner, indent=0):
+        pad = inner - len(ANSI_RE.sub("", part))
+        print(f"  {DIM}│{RESET} {' ' * (pad // 2)}{part}{' ' * (pad - pad // 2)} {DIM}│{RESET}")
     print(rule("├", "┬", "┤"))
     print(line(*header))
     for rows in groups:
@@ -934,12 +1078,12 @@ def show_dir(cfg):
     # OSC 8 hyperlink: clickable in most modern terminals, plain text elsewhere
     print(f"\033]8;;{url}\033\\{BOLD}{folder}{RESET}\033]8;;\033\\")
     if not os.path.isdir(folder):
-        print(f"{DIM}  (doesn't exist yet; it's created when you log your first entry){RESET}")
+        say(f"{DIM}  (doesn't exist yet; it's created when you log your first entry){RESET}")
     tool = copy_to_clipboard(folder)
     if tool:
-        print(f"{GREEN}✔ Copied folder path to clipboard{RESET}")
+        say(f"{GREEN}✔ Copied folder path to clipboard{RESET}")
     else:
-        print(f"{DIM}  No clipboard tool found (install wl-clipboard, xclip or xsel); copy the path above.{RESET}")
+        say(f"{DIM}  No clipboard tool found (install wl-clipboard, xclip or xsel); copy the path above.{RESET}")
 
 
 def main(argv):
@@ -952,12 +1096,15 @@ def main(argv):
             cfg["group_by"] = ask_group_by(form)
         save_config(cfg)
         print()
+    if cfg is not None and cfg.get("ask_every_time") != ask_flags(cfg):
+        cfg["ask_every_time"] = ask_flags(cfg)
+        save_config(cfg)
     if cfg is not None:
         cfg = migrate_csv(cfg)
         migrate_ungrouped(cfg)
     if cfg is None or "--setup" in argv:
         if cfg is None:
-            print("No config found, let's set osheet up first.\n")
+            say("No config found, let's set osheet up first.\n")
         setup(cfg)
         return
     if "--export" in argv:
@@ -973,5 +1120,5 @@ if __name__ == "__main__":
     try:
         main(sys.argv[1:])
     except (KeyboardInterrupt, EOFError):
-        print("\nCancelled, nothing saved.")
+        say("\nCancelled, nothing saved.")
         sys.exit(130)

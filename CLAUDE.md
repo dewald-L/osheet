@@ -18,7 +18,8 @@ Excel reports the file as corrupt. `main()` runs `migrate_csv`/`migrate_ungroupe
 ## Interactive UI (`Form`)
 - `Form(fields)` draws a boxed key/value panel and redraws it in place with plain ANSI (cursor up,
   `\033[2K`, `\033[J`). `self.drawn` = lines from the top of the panel down to the cursor; every
-  line goes through `fit()` so the count stays correct. Account for any new line you print.
+  line goes through `wrap()` (ANSI-aware word wrap) so the count stays correct. Account for any new
+  line you print. Messages printed outside a Form use `say()`, which wraps only when stdout is a TTY.
 - Flows are lists of step functions run by `form.run(steps)`; `Back` (menu `0`, or `<` at a text
   question) re-runs the previous step. Steps read earlier answers from a state dict so going back
   pre-selects them. A step may return the index of the next step (setup loops back to "confirm").
