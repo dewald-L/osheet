@@ -2,11 +2,12 @@
 """osheet - log timesheet entries to an Excel file based on a TimesheetUpload.xlsx template.
 
 Usage:
-    osheet            log an entry (runs setup instead if there is no config yet)
-    osheet --setup    (re)run the configuration step
-    osheet --export   copy the timesheet folder path to the clipboard
-    osheet --hours    show logged hours per category for today, this week or this month
-                      (--hours-day / --hours-week / --hours-month skip the question)
+    osheet                log an entry (runs setup instead if there is no config yet)
+    osheet -s, --setup    (re)run the configuration step
+    osheet -e, --export   copy the timesheet folder path to the clipboard
+    osheet -H, --hours    show logged hours per category for today, this week or this month
+                          (-d/--hours-day, -w/--hours-week, -m/--hours-month skip the question)
+    osheet -h, --help     show this help
 """
 
 import csv
@@ -33,7 +34,9 @@ DEFAULT_COLUMNS = ["Date", "Project", "Category", "Hours", "Minutes", "Billable"
                    "Description", "TicketNumber", "Sentiment", "WorkedFrom"]
 DEFAULT_LOCATIONS = ["Home", "Office", "Client", "Other"]
 DEFAULT_SENTIMENTS = ["Neutral", "Happy", "Sad"]
-DEFAULT_OUTPUT = os.path.join("~", "timesheets", "TimesheetUpload.xlsx")
+# Only the folder is configurable; files are named after their week/month (see grouped_path)
+OUTPUT_NAME = "TimesheetUpload.xlsx"
+DEFAULT_OUTPUT = os.path.join("~", "timesheets", OUTPUT_NAME)
 DEFAULT_TEMPLATE = os.path.join("~", "Downloads", "TimesheetUpload.xlsx")
 
 BOLD, DIM, CYAN, GREEN, RED, MAGENTA, RESET = (
@@ -300,10 +303,10 @@ def ask_group_by(form, current="week"):
 def group_label(group_by, date):
     if group_by == "month":
         return f"{date:%Y-%m}"
-    # dd-dd_MM, e.g. 05-11_10 for Mon 5 – Sun 11 Oct (month of the Monday)
+    # dd-dd_Month, e.g. 05-11_October for Mon 5 – Sun 11 Oct (month of the Monday)
     monday = date - dt.timedelta(days=date.weekday())
     sunday = monday + dt.timedelta(days=6)
-    return f"{monday:%d}-{sunday:%d}_{monday:%m}"
+    return f"{monday:%d}-{sunday:%d}_{monday:%B}"
 
 
 def output_path(cfg, date=None):
@@ -317,11 +320,9 @@ def output_path(cfg, date=None):
 
 
 def grouped_path(base, group_by, date):
-    """<folder>/<yyyy_Month>/<name>_<period>.xlsx; a week is filed under the month of its Monday."""
-    folder, name = os.path.split(base)
-    stem, ext = os.path.splitext(name)
+    """<folder>/<yyyy_Month>/<period>.xlsx; a week is filed under the month of its Monday."""
     start = date - dt.timedelta(days=date.weekday()) if group_by == "week" else date
-    return os.path.join(folder, f"{start:%Y}_{start:%B}", f"{stem}_{group_label(group_by, date)}{ext}")
+    return os.path.join(os.path.dirname(base), f"{start:%Y}_{start:%B}", f"{group_label(group_by, date)}.xlsx")
 
 
 def save_entries(cfg, entries):
@@ -363,6 +364,33 @@ def migrate_ungrouped(cfg):
     where = ", ".join(os.path.basename(p) for p in paths) or "nowhere (it was empty)"
     say(f"{DIM}Moved {len(entries)} entries from {os.path.basename(old)} into {where} "
           f"(old file kept as {os.path.basename(old)}.bak){RESET}\n")
+
+
+def migrate_file_names(cfg):
+    """One-off: rename <name>_<period>.xlsx files (and the old dd-dd_MM week label) to <period>.xlsx."""
+    if os.environ.get("OSHEET_FILE") or not cfg.get("group_by"):
+        return
+    folder = os.path.dirname(os.path.abspath(os.path.expanduser(cfg["output"])))
+    old = re.compile(r".+_(?:(\d\d-\d\d)_(\d\d|[A-Z][a-z]+)|(\d{4}-\d\d))\.xlsx")
+    for sub in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+        sub = os.path.join(folder, sub)
+        if not re.fullmatch(r"\d{4}_[A-Z][a-z]+", os.path.basename(sub)) or not os.path.isdir(sub):
+            continue
+        for f in sorted(os.listdir(sub)):
+            m = old.fullmatch(f)
+            if not m:
+                continue
+            if m[3]:
+                new = f"{m[3]}.xlsx"
+            elif m[2].isdigit():
+                if not 1 <= int(m[2]) <= 12:
+                    continue
+                new = f"{m[1]}_{dt.date(2000, int(m[2]), 1):%B}.xlsx"
+            else:
+                new = f"{m[1]}_{m[2]}.xlsx"
+            if not os.path.exists(os.path.join(sub, new)):
+                os.replace(os.path.join(sub, f), os.path.join(sub, new))
+                say(f"{DIM}Renamed {f} → {new}{RESET}")
 
 
 def migrate_csv(cfg):
@@ -409,9 +437,11 @@ def select_numbered(question, options, default=0):
     return options[int(ans) - 1] if ans.isdigit() and 0 < int(ans) <= len(options) else options[default]
 
 
-def _menu_loop(fd, options, default, draw, window=10, back=False):
-    """Arrow-key menu: ↑/↓ or j/k move, a number picks that option, typing filters.
-    `draw(lines)` renders it. Returns the chosen option, or None for "Back"."""
+def _menu_loop(fd, options, default, draw, window=10, back=False, checked=None):
+    """Arrow-key menu: ↑/↓ or j/k move, space/enter or a number picks that option, typing filters.
+    With `checked` (a list of bools, changed in place) it is a checklist instead: space or a
+    number toggles an option and enter submits. `draw(lines)` renders it.
+    Returns the chosen option (True for a checklist), or None for "Back"."""
     idx, query, number = default, "", ""
     width = len(str(len(options)))
     while True:
@@ -421,25 +451,35 @@ def _menu_loop(fd, options, default, draw, window=10, back=False):
         top = max(0, min(min(idx, len(view) - 1) - window // 2, len(view) - window))
         lines = []
         for pos in range(top, min(top + window, len(view))):
-            text = f"{view[pos] + 1:>{width}}. {options[view[pos]]}"
+            box = "" if checked is None else f"[{'x' if checked[view[pos]] else ' '}] "
+            text = f"{view[pos] + 1:>{width}}. {box}{options[view[pos]]}"
             lines.append(f"{CYAN}❯ {text}{RESET}" if pos == idx else f"  {text}")
         if back:
             text = f"{0:>{width}}. ← Back"
             lines.append(f"{CYAN}❯ {text}{RESET}" if idx == len(view) else f"  {DIM}{text}{RESET}")
+        pick_word = "toggle" if checked is not None else "select"
         if number:
-            hint = f"{DIM}  number: {RESET}{number}{DIM} · enter to select{RESET}"
+            hint = f"{DIM}  number: {RESET}{number}{DIM} · space to {pick_word}{RESET}"
         elif query:
             hint = f"{DIM}  filter: {RESET}{query}"
+        elif checked is not None:
+            hint = f"{DIM}  ↑/↓ or j/k move · space or number toggle · enter done · type to filter{RESET}"
         else:
-            hint = f"{DIM}  ↑/↓ or j/k move · number or enter select · type to filter{RESET}"
+            hint = f"{DIM}  ↑/↓ or j/k move · space, enter or number select · type to filter{RESET}"
         lines.append(hint)
         draw(lines)
 
         k = read_key(fd)
         typed, number = number, ""
-        if k in (b"\r", b"\n"):
-            return options[rows[idx]] if rows[idx] is not None else None
-        if k == b"\x1b[A" or (k == b"k" and not query):
+        if checked is not None and k in (b"\r", b"\n"):
+            return True if rows[idx] is not None else None
+        if k in (b" ", b"\r", b"\n"):
+            if rows[idx] is None:
+                return None
+            if checked is None:
+                return options[rows[idx]]
+            checked[rows[idx]] = not checked[rows[idx]]
+        elif k == b"\x1b[A" or (k == b"k" and not query):
             idx = (idx - 1) % len(rows)
         elif k == b"\x1b[B" or (k == b"j" and not query):
             idx = (idx + 1) % len(rows)
@@ -454,10 +494,13 @@ def _menu_loop(fd, options, default, draw, window=10, back=False):
             matches = [pos for pos, i in enumerate(view) if str(i + 1).startswith(typed)]
             exact = [pos for pos in matches if str(view[pos] + 1) == typed]
             if exact and len(matches) == 1:
-                return options[view[exact[0]]]
-            if matches:
+                idx = exact[0]
+                if checked is None:
+                    return options[view[idx]]
+                checked[view[idx]] = not checked[view[idx]]
+            elif matches:
                 idx, number = (exact or matches)[0], typed
-        elif len(k) == 1 and 32 <= k[0] < 127:
+        elif len(k) == 1 and 32 < k[0] < 127:
             query, idx = query + k.decode(), 0
 
 
@@ -610,30 +653,48 @@ class Form:
         sys.stdout.flush()
         self.drawn = len(lines)
 
+    def _menu(self, key, question, options, default, checked=None, summary=None):
+        """Run `_menu_loop` under the panel (TTY only). `summary()`, if given, is the
+        panel value for `key`, refreshed on every redraw."""
+        self.active = key
+        header = f"{BOLD}{MAGENTA}? {question}{RESET}"
+        size = shutil.get_terminal_size()
+        room = (size.lines - len(self.render(self.width())) - 6 - self.can_back
+                - (len(wrap(header, size.columns - 1)) - 1))
+
+        def draw(lines):
+            if summary:
+                self.values[key] = (summary(), "")
+            self.redraw([header, ""] + lines)
+
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        sys.stdout.write("\033[?25l")
+        try:
+            choice = _menu_loop(fd, options, default, draw, window=max(3, min(10, room)),
+                                back=self.can_back, checked=checked)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            sys.stdout.write("\033[?25h")
+        if choice is None:
+            raise Back
+        return choice
+
     def select(self, key, question, options, default=0):
         """Menu for `key`, drawn under the panel."""
         if not self.live:
             choice = select_numbered(question, options, default)
         else:
-            self.active = key
-            header = f"{BOLD}{MAGENTA}? {question}{RESET}"
-            size = shutil.get_terminal_size()
-            room = (size.lines - len(self.render(self.width())) - 6 - self.can_back
-                    - (len(wrap(header, size.columns - 1)) - 1))
-            fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
-            tty.setcbreak(fd)
-            sys.stdout.write("\033[?25l")
-            try:
-                choice = _menu_loop(fd, options, default, lambda lines: self.redraw([header, ""] + lines),
-                                    window=max(3, min(10, room)), back=self.can_back)
-            finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
-                sys.stdout.write("\033[?25h")
-            if choice is None:
-                raise Back
+            choice = self._menu(key, question, options, default)
         self.set(key, choice)
         return choice
+
+    def checklist(self, key, question, options, checked, summary):
+        """Checklist for `key` (TTY only): space toggles, enter submits. `checked` is
+        changed in place; `summary()` is the panel value, updated as options are toggled."""
+        self._menu(key, question, options, 0, checked=checked, summary=summary)
+        self.set(key, summary())
 
     def ask(self, key, question, default="", check=None):
         """Text input for `key`, drawn under the panel. `check(answer)` returns the value to
@@ -719,7 +780,8 @@ def setup(existing=None):
 
 
 def _setup_form(form, existing):
-    st = {"output": existing.get("output", DEFAULT_OUTPUT), "group_by": existing.get("group_by", "week"),
+    st = {"output": os.path.join(os.path.dirname(existing.get("output", "")) or os.path.dirname(DEFAULT_OUTPUT),
+                                 OUTPUT_NAME), "group_by": existing.get("group_by", "week"),
           "ask": ask_flags(existing)}
 
     def template():
@@ -779,7 +841,14 @@ def _setup_form(form, existing):
         asking = st["ask"]
         options = lambda: [f"[{'x' if asking[key] else ' '}] {label}" for key, label in ASK_FIELDS] + ["Done"]
         idx = len(ASK_FIELDS)
-        while True:
+        if form.live:
+            keys = [key for key, _ in ASK_FIELDS]
+            checked = [asking[key] for key in keys]
+            form.checklist("ask", "Which questions should be asked every time? "
+                                  "(unticked ones use the default)", [label for _, label in ASK_FIELDS],
+                           checked, lambda: ask_summary(dict(zip(keys, checked)), st["defaults"]))
+            asking.update(zip(keys, checked))
+        while not form.live:
             form.set("ask", ask_summary(asking, st["defaults"]))
             choice = form.select("ask", "Which questions should be asked every time? "
                                         "(pick one to tick/untick; unticked ones use the default)", options(), idx)
@@ -801,8 +870,17 @@ def _setup_form(form, existing):
         st["group_by"] = ask_group_by(form, st["group_by"])
 
     def output():
-        out = form.ask("output", "Save entries as? (the week/month is added to the name)", st["output"])
-        st["output"] = out if out.lower().endswith(".xlsx") else out + ".xlsx"
+        def check(raw):
+            folder = raw.strip().strip("'\"")
+            if not folder:
+                raise ValueError(f"{RED}Enter a folder{RESET}")
+            if os.path.isfile(os.path.expanduser(folder)):
+                raise ValueError(f"{RED}That's a file, not a folder:{RESET} {folder}")
+            if not folder.startswith("~"):
+                folder = os.path.abspath(folder)
+            return os.path.join(folder, OUTPUT_NAME)
+        st["output"] = form.ask("output", "Folder to save timesheets in? (one file per week/month)",
+                                os.path.dirname(st["output"]), check=check)
         if not form.live:
             print()
         return steps.index(confirm)
@@ -835,6 +913,10 @@ def ask_flags(cfg):
     """`ask_every_time` per entry question; a question set to false is answered with its default."""
     flags = cfg.get("ask_every_time", {})
     return {key: flags.get(key, True) is not False for key, _ in ASK_FIELDS}
+
+
+# Panel note for a question answered with its default because it isn't asked every time
+SKIPPED = "(skipped)"
 
 
 def ask_summary(asking, defaults):
@@ -872,7 +954,7 @@ def log_entry(cfg):
     def day():
         if not asking["day"]:
             st["date"] = today
-            form.set("day", f"{today:%A %d %b}")
+            form.set("day", f"{today:%A %d %b}", SKIPPED)
             return SKIP
         label = form.select("day", "Which day is the timesheet for?", labels,
                             pick(days, st.get("date"), today.weekday()))
@@ -882,7 +964,7 @@ def log_entry(cfg):
     def project():
         if not asking["project"] and defaults["project"] in projects:
             st["project"] = defaults["project"]
-            form.set("project", st["project"])
+            form.set("project", st["project"], SKIPPED)
             return SKIP
         st["project"] = form.select("project", "Which project?", projects,
                                     pick(projects, st.get("project"), pick(projects, defaults["project"])))
@@ -891,7 +973,7 @@ def log_entry(cfg):
         cats = cfg["projects"][st["project"]]["categories"]
         if not asking["category"] and defaults["category"] in cats:
             st["category"] = defaults["category"]
-            form.set("category", st["category"])
+            form.set("category", st["category"], SKIPPED)
             return SKIP
         st["category"] = form.select("category", "What type of entry is it?", cats,
                                      pick(cats, st.get("category"), pick(cats, defaults["category"])))
@@ -912,16 +994,17 @@ def log_entry(cfg):
         st["hours"], st["mins"] = divmod(rounded, 60)
         st["time"] = f"{st['hours']}h{st['mins']:02d}"
         note = f"(rounded up from {minutes // 60}h{minutes % 60:02d})" if rounded != minutes else ""
-        form.set("time", st["time"], note)
         if skipped:
+            form.set("time", st["time"], " ".join(filter(None, [note, SKIPPED])))
             return SKIP
+        form.set("time", st["time"], note)
         if not form.live:
             print(f"  {GREEN}{st['time']}{RESET}{f' {DIM}{note}{RESET}' if note else ''}")
 
     def location():
         if not asking["location"] and defaults["location"] in cfg["locations"]:
             st["location"] = defaults["location"]
-            form.set("location", st["location"])
+            form.set("location", st["location"], SKIPPED)
             return SKIP
         st["location"] = form.select("location", "Where did you work from?", cfg["locations"],
                                      pick(cfg["locations"], st.get("location"),
@@ -952,6 +1035,9 @@ def log_entry(cfg):
 # --- hours summary ---------------------------------------------------------
 
 HOURS_FLAGS = {"--hours-day": "day", "--hours-week": "week", "--hours-month": "month"}
+KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--hours", *HOURS_FLAGS}
+SHORT_FLAGS = {"-s": "--setup", "-e": "--export", "-H": "--hours",
+               "-d": "--hours-day", "-w": "--hours-week", "-m": "--hours-month"}
 
 
 def fmt_minutes(total):
@@ -1087,9 +1173,15 @@ def show_dir(cfg):
 
 
 def main(argv):
+    argv = [SHORT_FLAGS.get(a, a) for a in argv]
     if any(a in ("-h", "--help") for a in argv):
         print(__doc__.strip())
         return
+    unknown = [a for a in argv if a not in KNOWN_FLAGS]
+    if unknown:
+        print(f"osheet: unrecognised argument(s): {' '.join(unknown)}", file=sys.stderr)
+        print("Run 'osheet --help' for usage.", file=sys.stderr)
+        sys.exit(2)
     cfg = load_config()
     if cfg is not None and "group_by" not in cfg:
         with Form([("group_by", "Group files")]) as form:
@@ -1102,6 +1194,7 @@ def main(argv):
     if cfg is not None:
         cfg = migrate_csv(cfg)
         migrate_ungrouped(cfg)
+        migrate_file_names(cfg)
     if cfg is None or "--setup" in argv:
         if cfg is None:
             say("No config found, let's set osheet up first.\n")
