@@ -66,7 +66,7 @@ Upgrading from an earlier version: osheet asks once how to group files, then mov
 osheet --hours
 ```
 
-Asks whether to show this week (Mon–Sun) or this month, then lists the time logged per project and entry type, with a total. Use `osheet --hours-week` or `osheet --hours-month` to skip the question.
+Asks whether to show today, this week (Mon–Sun) or this month, then shows a table of the time logged per project and entry type, with subtotals for projects that have more than one type and an overall total. Use `osheet --hours-day`, `osheet --hours-week` or `osheet --hours-month` to skip the question.
 
 ### Finding the file
 

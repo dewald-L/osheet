@@ -5,8 +5,8 @@ Usage:
     osheet            log an entry (runs setup instead if there is no config yet)
     osheet --setup    (re)run the configuration step
     osheet --export   copy the timesheet folder path to the clipboard
-    osheet --hours    show logged hours per category for this week or month
-                      (--hours-week / --hours-month skip the question)
+    osheet --hours    show logged hours per category for today, this week or this month
+                      (--hours-day / --hours-week / --hours-month skip the question)
 """
 
 import csv
@@ -820,7 +820,7 @@ def log_entry(cfg):
 
 # --- hours summary ---------------------------------------------------------
 
-HOURS_FLAGS = {"--hours-week": "week", "--hours-month": "month"}
+HOURS_FLAGS = {"--hours-day": "day", "--hours-week": "week", "--hours-month": "month"}
 
 
 def fmt_minutes(total):
@@ -828,22 +828,25 @@ def fmt_minutes(total):
 
 
 def show_hours(cfg, period=None):
-    """Logged time for this week or month, per project and category, with a total."""
+    """Logged time for today, this week or this month, per project and category, with a total."""
     if period is None:
-        choices = {"This week": "week", "This month": "month"}
+        choices = {"Today": "day", "This week": "week", "This month": "month"}
         with Form([]) as form:
             period = choices[form.select(None, "Show hours for?", list(choices))]
-        print(f"{DIM}Tip: osheet --hours-week or osheet --hours-month skips this question{RESET}\n")
+        print(f"{DIM}Tip: osheet --hours-day, --hours-week or --hours-month skips this question{RESET}\n")
 
     today = dt.date.today()
-    if period == "week":
+    if period == "day":
+        start = end = today
+        title, span = "Today", f"({today:%a %d %b})"
+    elif period == "week":
         start = today - dt.timedelta(days=today.weekday())
         end = start + dt.timedelta(days=6)
-        title = f"This week {DIM}({start:%a %d %b} – {end:%a %d %b}){RESET}"
+        title, span = "This week", f"({start:%a %d %b} – {end:%a %d %b})"
     else:
         start = today.replace(day=1)
         end = (start + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
-        title = f"This month {DIM}({start:%B %Y}){RESET}"
+        title, span = "This month", f"({start:%B %Y})"
     dates = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
 
     # A week or month can span several files; each holds only entries from its own period
@@ -857,22 +860,51 @@ def show_hours(cfg, period=None):
                 cat = e.get("Category", "?")
                 cats[cat] = cats.get(cat, 0) + e["Hours"] * 60 + e["Minutes"]
 
-    print(f"{BOLD}{title}{RESET}\n")
     if not totals:
-        print(f"{DIM}  No entries logged {'this ' + period} yet.{RESET}")
+        print(f"{BOLD}{title} {DIM}{span}{RESET}\n")
+        print(f"{DIM}  No entries logged {'today' if period == 'day' else 'this ' + period} yet.{RESET}")
         return
-    rows = []  # (name, minutes, is_project)
+    # Boxed table: one group per project (busiest first), with a subtotal when it has several categories
+    groups = []
     for project, cats in sorted(totals.items(), key=lambda kv: -sum(kv[1].values())):
-        rows.append((project, sum(cats.values()), True))
-        rows += [(f"  {cat}", mins, False) for cat, mins in sorted(cats.items(), key=lambda kv: -kv[1])]
-    total = sum(sum(c.values()) for c in totals.values())
-    width = max(len(name) for name, _, _ in rows + [("Total", 0, 0)]) + 4
-    for name, mins, is_project in rows:
-        style = BOLD if is_project else ""
-        print(f"  {style}{name:<{width}}{fmt_minutes(mins):>6}{RESET}")
-    print(f"  {DIM}{'─' * (width + 6)}{RESET}")
-    print(f"  {BOLD}{GREEN}{'Total':<{width}}{fmt_minutes(total):>6}{RESET}")
+        rows = [(project if i == 0 else "", cat, fmt_minutes(mins), "")
+                for i, (cat, mins) in enumerate(sorted(cats.items(), key=lambda kv: -kv[1]))]
+        if len(rows) > 1:
+            rows.append(("", "Subtotal", fmt_minutes(sum(cats.values())), BOLD))
+        groups.append(rows)
+    total = ("Total", "", fmt_minutes(sum(sum(c.values()) for c in totals.values())), BOLD + GREEN)
+    header = ("Project", "Category", "Time", BOLD)
+    widths = [max(len(r[i]) for g in groups + [[header, total]] for r in g) for i in range(3)]
+    heading = f"{title} {span}"
+    widths[1] += max(0, len(heading) - (sum(widths) + 6))  # widen so the heading row fits
 
+    def rule(left, mid, right):
+        return f"  {DIM}{left}{mid.join('─' * (w + 2) for w in widths)}{right}{RESET}"
+
+    def line(project, cat, time, style):
+        bar = f"{DIM}│{RESET}"
+        cells = [f"{project:<{widths[0]}}", f"{cat:<{widths[1]}}", f"{time:>{widths[2]}}"]
+        if style and not project:  # subtotal: highlight only the category and time
+            cells[1:] = [f"{style}{c}{RESET}" for c in cells[1:]]
+        elif style:
+            cells = [f"{style}{c}{RESET}" for c in cells]
+        elif project:
+            cells[0] = f"{BOLD}{cells[0]}{RESET}"
+        return f"  {bar} " + f" {bar} ".join(cells) + f" {bar}"
+
+    inner = sum(widths) + 6
+    print(f"  {DIM}╭{'─' * (inner + 2)}╮{RESET}")
+    pad = inner - len(heading)
+    print(f"  {DIM}│{RESET} {' ' * (pad // 2)}{BOLD}{title}{RESET} {DIM}{span}{RESET}{' ' * (pad - pad // 2)} {DIM}│{RESET}")
+    print(rule("├", "┬", "┤"))
+    print(line(*header))
+    for rows in groups:
+        print(rule("├", "┼", "┤"))
+        for row in rows:
+            print(line(*row))
+    print(rule("├", "┼", "┤"))
+    print(line(*total))
+    print(rule("╰", "┴", "╯"))
 
 def copy_to_clipboard(text):
     """Copy text using the platform's clipboard tool. Returns the tool used, or None."""
