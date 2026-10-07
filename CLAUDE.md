@@ -9,6 +9,12 @@ User-facing behaviour is in README.md; update it when the UX or flags change.
 - No curses or alternate screen: the final panel must stay in the scrollback.
 - Don't change the config format or the Excel output (rows appended into the template's table).
 
+## Excel I/O
+No openpyxl: the xlsx is read and written as a zip of XML (`read_xlsx`, `append_rows`). Appending
+updates the sheet rows, `sharedStrings.xml`, the `<dimension>` ref, the data-validation `sqref`s and
+the table's `ref`; dates are serial numbers with the template's date style. Keep these consistent or
+Excel reports the file as corrupt. `main()` runs `migrate_csv`/`migrate_ungrouped` on every start.
+
 ## Interactive UI (`Form`)
 - `Form(fields)` draws a boxed key/value panel and redraws it in place with plain ANSI (cursor up,
   `\033[2K`, `\033[J`). `self.drawn` = lines from the top of the panel down to the cursor; every
@@ -20,6 +26,7 @@ User-facing behaviour is in README.md; update it when the UX or flags change.
   This output must stay byte-identical; check it by diffing piped runs against `git show HEAD:osheet`.
 
 ## Testing
+No test suite. Quick check: `python3 -m py_compile osheet`.
 Never run against the real `~/.config/osheet` or `~/timesheets`. Use a throwaway HOME:
 ```bash
 H=$(mktemp -d); mkdir -p $H/.config/osheet
@@ -28,7 +35,8 @@ printf '\n7\n\nabc\n2h05\n2\nDesc\n' | env -u XDG_CONFIG_HOME HOME=$H ./osheet  
 ```
 (`XDG_CONFIG_HOME` must be unset or it overrides HOME.) For the live UI, drive it with `pty.fork()`,
 set the size with `TIOCSWINSZ`, send keys (`b'\x1b[A'`, `b'\r'`, `b'2h05\r'`), and replay the output
-through a small ANSI emulator to check the final screen. Read entries back with `read_entries(path)`.
+through a small ANSI emulator to check the final screen. Read entries back with `read_entries(path)`;
+set `OSHEET_FILE=$H/out.xlsx` to pin the output to one known file.
 
 ## Git
 Commits are GPG-signed (per git config); push to `origin main`.
