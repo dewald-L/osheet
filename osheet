@@ -5,6 +5,8 @@ Usage:
     osheet            log an entry (runs setup instead if there is no config yet)
     osheet --setup    (re)run the configuration step
     osheet --export   copy the timesheet folder path to the clipboard
+    osheet --hours    show logged hours per category for this week or month
+                      (--hours-week / --hours-month skip the question)
 """
 
 import csv
@@ -34,7 +36,8 @@ DEFAULT_SENTIMENTS = ["Neutral", "Happy", "Sad"]
 DEFAULT_OUTPUT = os.path.join("~", "timesheets", "TimesheetUpload.xlsx")
 DEFAULT_TEMPLATE = os.path.join("~", "Downloads", "TimesheetUpload.xlsx")
 
-BOLD, DIM, CYAN, GREEN, RED, RESET = "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[31m", "\033[0m"
+BOLD, DIM, CYAN, GREEN, RED, MAGENTA, RESET = (
+    "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[31m", "\033[35m", "\033[0m")
 
 
 # --- config ----------------------------------------------------------------
@@ -332,12 +335,9 @@ def save_entries(cfg, entries):
     return list(by_path)
 
 
-def migrate_ungrouped(cfg):
-    """One-off: split a single pre-grouping Excel file into week/month files."""
-    old = os.path.abspath(os.path.expanduser(cfg["output"]))
-    if os.environ.get("OSHEET_FILE") or not cfg.get("group_by") or not os.path.exists(old):
-        return
-    sheets = read_xlsx(old)
+def read_entries(path):
+    """Entries (dicts keyed by column header) from a timesheet workbook."""
+    sheets = read_xlsx(path)
     rows = next(r for name, r in sheets.items() if name not in ("Lookup", "Validation"))
     headers = rows[0]
     entries = []
@@ -349,6 +349,15 @@ def migrate_ungrouped(cfg):
         for k in ("Hours", "Minutes"):
             e[k] = int(float(e.get(k) or 0))
         entries.append(e)
+    return entries
+
+
+def migrate_ungrouped(cfg):
+    """One-off: split a single pre-grouping Excel file into week/month files."""
+    old = os.path.abspath(os.path.expanduser(cfg["output"]))
+    if os.environ.get("OSHEET_FILE") or not cfg.get("group_by") or not os.path.exists(old):
+        return
+    entries = read_entries(old)
     paths = save_entries(cfg, entries)
     os.replace(old, old + ".bak")
     where = ", ".join(os.path.basename(p) for p in paths) or "nowhere (it was empty)"
@@ -400,34 +409,54 @@ def select_numbered(question, options, default=0):
     return options[int(ans) - 1] if ans.isdigit() and 0 < int(ans) <= len(options) else options[default]
 
 
-def _menu_loop(fd, options, default, draw, window=10):
-    """Arrow-key menu (arrows, numbers, type-to-filter); `draw(lines)` renders it."""
-    idx, query = default, ""
+def _menu_loop(fd, options, default, draw, window=10, back=False):
+    """Arrow-key menu: ↑/↓ or j/k move, a number picks that option, typing filters.
+    `draw(lines)` renders it. Returns the chosen option, or None for "Back"."""
+    idx, query, number = default, "", ""
+    width = len(str(len(options)))
     while True:
-        view = [o for o in options if query.lower() in o.lower()] or options
-        idx = min(idx, len(view) - 1)
-        top = max(0, min(idx - window // 2, len(view) - window))
+        view = [i for i, o in enumerate(options) if query.lower() in o.lower()] or list(range(len(options)))
+        rows = view + ([None] if back else [])
+        idx = min(idx, len(rows) - 1)
+        top = max(0, min(min(idx, len(view) - 1) - window // 2, len(view) - window))
         lines = []
-        for i in range(top, min(top + window, len(view))):
-            mark = f"{CYAN}❯ {view[i]}{RESET}" if i == idx else f"  {view[i]}"
-            lines.append(mark)
-        hint = f"{DIM}  ↑/↓ move · enter select · type to filter{RESET}"
-        if query:
+        for pos in range(top, min(top + window, len(view))):
+            text = f"{view[pos] + 1:>{width}}. {options[view[pos]]}"
+            lines.append(f"{CYAN}❯ {text}{RESET}" if pos == idx else f"  {text}")
+        if back:
+            text = f"{0:>{width}}. ← Back"
+            lines.append(f"{CYAN}❯ {text}{RESET}" if idx == len(view) else f"  {DIM}{text}{RESET}")
+        if number:
+            hint = f"{DIM}  number: {RESET}{number}{DIM} · enter to select{RESET}"
+        elif query:
             hint = f"{DIM}  filter: {RESET}{query}"
+        else:
+            hint = f"{DIM}  ↑/↓ or j/k move · number or enter select · type to filter{RESET}"
         lines.append(hint)
         draw(lines)
 
         k = read_key(fd)
+        typed, number = number, ""
         if k in (b"\r", b"\n"):
-            return view[idx]
-        if k == b"\x1b[A":
-            idx = (idx - 1) % len(view)
-        elif k == b"\x1b[B":
-            idx = (idx + 1) % len(view)
+            return options[rows[idx]] if rows[idx] is not None else None
+        if k == b"\x1b[A" or (k == b"k" and not query):
+            idx = (idx - 1) % len(rows)
+        elif k == b"\x1b[B" or (k == b"j" and not query):
+            idx = (idx + 1) % len(rows)
         elif k in (b"\x7f", b"\x08"):
-            query, idx = query[:-1], 0
-        elif len(k) == 1 and k.isdigit() and not query and 0 < int(k) <= len(view):
-            idx = int(k) - 1
+            if not typed:
+                query, idx = query[:-1], 0
+        elif len(k) == 1 and k.isdigit():
+            if back and not typed and k == b"0":
+                return None
+            # Pick as soon as the number can't grow into another visible option's number
+            typed += k.decode()
+            matches = [pos for pos, i in enumerate(view) if str(i + 1).startswith(typed)]
+            exact = [pos for pos in matches if str(view[pos] + 1) == typed]
+            if exact and len(matches) == 1:
+                return options[view[exact[0]]]
+            if matches:
+                idx, number = (exact or matches)[0], typed
         elif len(k) == 1 and 32 <= k[0] < 127:
             query, idx = query + k.decode(), 0
 
@@ -456,6 +485,10 @@ def fit(line, width):
     return "".join(out)
 
 
+class Back(Exception):
+    """Raised by a Form question when the user chooses to go back."""
+
+
 class Form:
     """Panel of `Label  value` lines that redraws in place as questions are answered,
     with the current question drawn below it. Without a TTY, questions and answers
@@ -467,6 +500,7 @@ class Form:
         self.active = None
         self.drawn = 0         # lines from the top of the panel down to the cursor
         self.live = termios is not None and sys.stdin.isatty()
+        self.can_back = False
 
     def __enter__(self):
         return self
@@ -476,27 +510,52 @@ class Form:
         if self.live:
             self.redraw()
 
+    def run(self, steps):
+        """Run question steps in order. Going back from a question re-runs the step before it;
+        a step may return the index of the step to run next."""
+        i, history = 0, []
+        while i < len(steps):
+            self.can_back = self.live and bool(history)
+            try:
+                nxt = steps[i]()
+            except Back:
+                i = history.pop()
+                continue
+            history.append(i)
+            i = i + 1 if nxt is None else nxt
+        self.can_back = False
+
     def set(self, key, text, note=""):
         if key is not None:
             self.values[key] = (text, note)
         self.active = None
 
-    def render(self):
-        width = max((len(label) for _, label in self.fields), default=0)
-        lines = []
+    def render(self, width):
+        """Panel lines, boxed to `width` columns."""
+        if not self.fields:
+            return []
+        label_w = max(len(label) for _, label in self.fields)
+        inner = width - 4
+        lines = [f"{DIM}╭{'─' * (width - 2)}╮{RESET}"]
         for key, label in self.fields:
             text, note = self.values.get(key, ("", ""))
             value = text + (f" {DIM}{note}{RESET}" if note else "") if text else f"{DIM}—{RESET}"
             if key == self.active:
-                lines.append(f"{CYAN}❯ {label:<{width}}  {BOLD}{value}{RESET}")
+                row = f"{CYAN}❯ {label:<{label_w}}  {BOLD}{value}{RESET}"
             else:
-                lines.append(f"  {DIM}{label:<{width}}{RESET}  {BOLD}{value}{RESET}")
+                row = f"  {DIM}{label:<{label_w}}{RESET}  {BOLD}{value}{RESET}"
+            row = fit(row, inner)
+            row += " " * (inner - len(ANSI_RE.sub("", row)))
+            lines.append(f"{DIM}│{RESET} {row} {DIM}│{RESET}")
+        lines.append(f"{DIM}╰{'─' * (width - 2)}╯{RESET}")
         return lines
 
     def redraw(self, question=()):
         """Redraw the panel plus `question` lines over what was drawn before."""
         cols = shutil.get_terminal_size().columns
-        lines = self.render() + ([""] if self.fields and question else []) + list(question)
+        width = max(20, min(cols - 1, 80))
+        gap = [""] if self.fields and question else []
+        lines = self.render(width) + gap + list(question)
         up = f"\033[{self.drawn}A" if self.drawn else ""
         sys.stdout.write("\r" + up + "".join(f"\033[2K{fit(line, cols - 1)}\n" for line in lines) + "\033[J")
         sys.stdout.flush()
@@ -508,18 +567,20 @@ class Form:
             choice = select_numbered(question, options, default)
         else:
             self.active = key
-            header = f"{BOLD}? {question}{RESET}"
-            room = shutil.get_terminal_size().lines - len(self.fields) - 4
+            header = f"{BOLD}{MAGENTA}? {question}{RESET}"
+            room = shutil.get_terminal_size().lines - len(self.fields) - 8 - self.can_back
             fd = sys.stdin.fileno()
             old = termios.tcgetattr(fd)
             tty.setcbreak(fd)
             sys.stdout.write("\033[?25l")
             try:
-                choice = _menu_loop(fd, options, default, lambda lines: self.redraw([header] + lines),
-                                    window=max(3, min(10, room)))
+                choice = _menu_loop(fd, options, default, lambda lines: self.redraw([header, ""] + lines),
+                                    window=max(3, min(10, room)), back=self.can_back)
             finally:
                 termios.tcsetattr(fd, termios.TCSADRAIN, old)
                 sys.stdout.write("\033[?25h")
+            if choice is None:
+                raise Back
         self.set(key, choice)
         return choice
 
@@ -531,10 +592,13 @@ class Form:
             if self.live:
                 self.active = key
                 suffix = f" {DIM}({default}){RESET}" if default else ""
-                self.redraw([f"{BOLD}? {question}{RESET}{suffix}"] + ([f"  {error}"] if error else []))
+                suffix += f" {DIM}· enter < to go back{RESET}" if self.can_back else ""
+                self.redraw([f"{BOLD}{MAGENTA}? {question}{RESET}{suffix}"] + ([f"  {error}"] if error else []))
                 raw = input(f"  {CYAN}❯{RESET} ")
                 # The input line (wrapped if long) now sits above the cursor too
                 self.drawn += (4 + len(raw) - 1) // shutil.get_terminal_size().columns + 1
+                if self.can_back and raw.strip() == "<":
+                    raise Back
                 ans = raw.strip() or default
             else:
                 if error:
@@ -568,18 +632,6 @@ def parse_duration(text):
 
 # --- setup -----------------------------------------------------------------
 
-def choose_defaults(form, data, defaults):
-    projects = list(data["projects"])
-    project = form.select("project", "Default project?", projects, pick(projects, defaults["project"]))
-    cats = data["projects"][project]["categories"]
-    category = form.select("category", "Default entry type?", cats, pick(cats, defaults["category"]))
-    location = form.select("location", "Default location?", data["locations"],
-                           pick(data["locations"], defaults["location"]))
-    sentiment = form.select("sentiment", "Default sentiment?", data["sentiments"],
-                            pick(data["sentiments"], defaults["sentiment"]))
-    return {"project": project, "category": category, "location": location, "sentiment": sentiment}
-
-
 def load_template(raw):
     """(path, parsed template) for a path typed by the user; ValueError if it can't be used."""
     template = os.path.abspath(os.path.expanduser(raw.strip().strip("'\"")))
@@ -600,10 +652,11 @@ def setup(existing=None):
     existing = existing or {}
     print(f"{BOLD}osheet setup{RESET} {DIM}(config: {CONFIG_PATH}){RESET}\n")
     with Form(SETUP_FIELDS) as form:
-        template, data, defaults, output, group_by = _setup_form(form, existing)
+        st = _setup_form(form, existing)
 
-    store_template(template)
-    cfg = {"template": template, "output": output, "group_by": group_by, "defaults": defaults, **data}
+    store_template(st["template"])
+    cfg = {"template": st["template"], "output": st["output"], "group_by": st["group_by"],
+           "defaults": st["defaults"], **st["data"]}
     save_config(cfg)
     if form.live:
         print()
@@ -614,35 +667,37 @@ def setup(existing=None):
 
 
 def _setup_form(form, existing):
-    # Template
-    suggested = existing.get("template") or DEFAULT_TEMPLATE
-    template, data = form.ask("template", "Path to the timesheet template (.xlsx)?", suggested,
-                              check=load_template)
-    n_cats = sum(len(p["categories"]) for p in data["projects"].values())
-    shown = template.replace(os.path.expanduser("~"), "~", 1)
-    form.set("template", shown, f"({len(data['projects'])} projects, {n_cats} entry types)")
-    if not form.live:
-        print(f"  {GREEN}Found {len(data['projects'])} projects, {n_cats} entry types{RESET}\n")
+    st = {"output": existing.get("output", DEFAULT_OUTPUT), "group_by": existing.get("group_by", "week")}
 
-    # Proposed defaults: keep previous choices where still valid
-    projects = list(data["projects"])
-    old = existing.get("defaults", {})
-    billable = [p for p in projects if data["projects"][p]["billable"] == "Yes"]
-    project = old.get("project") if old.get("project") in projects else (billable or projects)[0]
-    cats = data["projects"][project]["categories"]
-    defaults = {
-        "project": project,
-        "category": cats[pick(cats, old.get("category"), pick(cats, "Software Development"))],
-        "location": data["locations"][pick(data["locations"], old.get("location"),
-                                           pick(data["locations"], "Home"))],
-        "sentiment": data["sentiments"][pick(data["sentiments"], old.get("sentiment"),
-                                             pick(data["sentiments"], "Neutral"))],
-    }
-    output = existing.get("output", DEFAULT_OUTPUT)
-    group_by = existing.get("group_by", "week")
+    def template():
+        suggested = st.get("template") or existing.get("template") or DEFAULT_TEMPLATE
+        st["template"], data = form.ask("template", "Path to the timesheet template (.xlsx)?", suggested,
+                                        check=load_template)
+        st["data"] = data
+        n_cats = sum(len(p["categories"]) for p in data["projects"].values())
+        shown = st["template"].replace(os.path.expanduser("~"), "~", 1)
+        form.set("template", shown, f"({len(data['projects'])} projects, {n_cats} entry types)")
+        if not form.live:
+            print(f"  {GREEN}Found {len(data['projects'])} projects, {n_cats} entry types{RESET}\n")
 
-    while True:
-        example = grouped_path(output, group_by, dt.date.today())
+        # Proposed defaults: keep previous choices where still valid
+        projects = list(data["projects"])
+        old = st.get("defaults") or existing.get("defaults", {})
+        billable = [p for p in projects if data["projects"][p]["billable"] == "Yes"]
+        project = old.get("project") if old.get("project") in projects else (billable or projects)[0]
+        cats = data["projects"][project]["categories"]
+        st["defaults"] = {
+            "project": project,
+            "category": cats[pick(cats, old.get("category"), pick(cats, "Software Development"))],
+            "location": data["locations"][pick(data["locations"], old.get("location"),
+                                               pick(data["locations"], "Home"))],
+            "sentiment": data["sentiments"][pick(data["sentiments"], old.get("sentiment"),
+                                                 pick(data["sentiments"], "Neutral"))],
+        }
+
+    def confirm():
+        defaults, group_by = st["defaults"], st["group_by"]
+        example = grouped_path(st["output"], group_by, dt.date.today())
         for key in ("project", "category", "location", "sentiment"):
             form.set(key, defaults[key])
         form.set("group_by", f"by {group_by}")
@@ -656,15 +711,35 @@ def _setup_form(form, existing):
             print(f"  Group files {CYAN}by {group_by}{RESET}")
             print(f"  Save to     {CYAN}{example}{RESET} {DIM}(e.g.){RESET}\n")
         answer = form.select(None, "Use these defaults?", ["Yes, save", "Change them"])
-        if answer.startswith("Yes"):
-            return template, data, defaults, output, group_by
-        defaults = choose_defaults(form, data, defaults)
-        group_by = ask_group_by(form, group_by)
-        output = form.ask("output", "Save entries as? (the week/month is added to the name)", output)
-        if not output.lower().endswith(".xlsx"):
-            output += ".xlsx"
+        return len(steps) if answer.startswith("Yes") else None
+
+    def default_of(key, question, options):
+        def step():
+            st["defaults"][key] = form.select(key, question, options(), pick(options(), st["defaults"][key]))
+        return step
+
+    def group_by():
+        st["group_by"] = ask_group_by(form, st["group_by"])
+
+    def output():
+        out = form.ask("output", "Save entries as? (the week/month is added to the name)", st["output"])
+        st["output"] = out if out.lower().endswith(".xlsx") else out + ".xlsx"
         if not form.live:
             print()
+        return steps.index(confirm)
+
+    data = lambda: st["data"]
+    steps = [
+        template, confirm,
+        default_of("project", "Default project?", lambda: list(data()["projects"])),
+        default_of("category", "Default entry type?",
+                   lambda: data()["projects"][st["defaults"]["project"]]["categories"]),
+        default_of("location", "Default location?", lambda: data()["locations"]),
+        default_of("sentiment", "Default sentiment?", lambda: data()["sentiments"]),
+        group_by, output,
+    ]
+    form.run(steps)
+    return st
 
 
 # --- log entry -------------------------------------------------------------
@@ -687,46 +762,116 @@ def log_entry(cfg):
     days = [monday + dt.timedelta(days=i) for i in range(7)]
     labels = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
 
-    with Form(ENTRY_FIELDS) as form:
-        # 1. Day
-        label = form.select("day", "Which day is the timesheet for?", labels, default=today.weekday())
-        date = days[labels.index(label)]
-        form.set("day", f"{date:%A %d %b}")
+    projects = list(cfg["projects"])
+    st = {}
 
-        # 2. Project + type of entry
-        projects = list(cfg["projects"])
-        project = form.select("project", "Which project?", projects, pick(projects, defaults["project"]))
-        billable = cfg["projects"][project]["billable"]
-        categories = cfg["projects"][project]["categories"]
-        category = form.select("category", "What type of entry is it?", categories,
-                               pick(categories, defaults["category"]))
+    def day():
+        label = form.select("day", "Which day is the timesheet for?", labels,
+                            pick(days, st.get("date"), today.weekday()))
+        st["date"] = days[labels.index(label)]
+        form.set("day", f"{st['date']:%A %d %b}")
 
-        # 3. Time, rounded up to the next 15 minutes
-        minutes = form.ask("time", "Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)", check=check_duration)
+    def project():
+        st["project"] = form.select("project", "Which project?", projects,
+                                    pick(projects, st.get("project"), pick(projects, defaults["project"])))
+
+    def category():
+        cats = cfg["projects"][st["project"]]["categories"]
+        st["category"] = form.select("category", "What type of entry is it?", cats,
+                                     pick(cats, st.get("category"), pick(cats, defaults["category"])))
+
+    def time():
+        # Rounded up to the next 15 minutes
+        minutes = form.ask("time", "Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)", st.get("time", ""),
+                           check=check_duration)
         rounded = math.ceil(minutes / 15) * 15
-        hours, mins = divmod(rounded, 60)
+        st["hours"], st["mins"] = divmod(rounded, 60)
+        st["time"] = f"{st['hours']}h{st['mins']:02d}"
         note = f"(rounded up from {minutes // 60}h{minutes % 60:02d})" if rounded != minutes else ""
-        form.set("time", f"{hours}h{mins:02d}", note)
+        form.set("time", st["time"], note)
         if not form.live:
-            print(f"  {GREEN}{hours}h{mins:02d}{RESET}{f' {DIM}{note}{RESET}' if note else ''}")
+            print(f"  {GREEN}{st['time']}{RESET}{f' {DIM}{note}{RESET}' if note else ''}")
 
-        # 4. Location
-        location = form.select("location", "Where did you work from?", cfg["locations"],
-                               pick(cfg["locations"], defaults["location"]))
+    def location():
+        st["location"] = form.select("location", "Where did you work from?", cfg["locations"],
+                                     pick(cfg["locations"], st.get("location"),
+                                          pick(cfg["locations"], defaults["location"])))
 
-        description = form.ask("description", "Description? (optional)")
+    def description():
+        st["description"] = form.ask("description", "Description? (optional)", st.get("description", ""))
 
-    # 5. Store
+    with Form(ENTRY_FIELDS) as form:
+        form.run([day, project, category, time, location, description])
+
+    # Store
+    date, hours, mins = st["date"], st["hours"], st["mins"]
     values = {
-        "Date": date, "Project": project, "Category": category,
-        "Hours": hours, "Minutes": mins, "Billable": billable,
-        "Description": description, "TicketNumber": "", "Sentiment": defaults["sentiment"],
-        "WorkedFrom": location,
+        "Date": date, "Project": st["project"], "Category": st["category"],
+        "Hours": hours, "Minutes": mins, "Billable": cfg["projects"][st["project"]]["billable"],
+        "Description": st["description"], "TicketNumber": "", "Sentiment": defaults["sentiment"],
+        "WorkedFrom": st["location"],
     }
     path, = save_entries(cfg, [values])
 
-    print(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {project} / {category} · {hours}h{mins:02d} · {location}")
+    print(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {st['project']} / {st['category']} · "
+          f"{hours}h{mins:02d} · {st['location']}")
     print(f"{DIM}  → {path}{RESET}")
+
+
+# --- hours summary ---------------------------------------------------------
+
+HOURS_FLAGS = {"--hours-week": "week", "--hours-month": "month"}
+
+
+def fmt_minutes(total):
+    return f"{total // 60}h{total % 60:02d}"
+
+
+def show_hours(cfg, period=None):
+    """Logged time for this week or month, per project and category, with a total."""
+    if period is None:
+        choices = {"This week": "week", "This month": "month"}
+        with Form([]) as form:
+            period = choices[form.select(None, "Show hours for?", list(choices))]
+        print(f"{DIM}Tip: osheet --hours-week or osheet --hours-month skips this question{RESET}\n")
+
+    today = dt.date.today()
+    if period == "week":
+        start = today - dt.timedelta(days=today.weekday())
+        end = start + dt.timedelta(days=6)
+        title = f"This week {DIM}({start:%a %d %b} – {end:%a %d %b}){RESET}"
+    else:
+        start = today.replace(day=1)
+        end = (start + dt.timedelta(days=32)).replace(day=1) - dt.timedelta(days=1)
+        title = f"This month {DIM}({start:%B %Y}){RESET}"
+    dates = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
+
+    # A week or month can span several files; each holds only entries from its own period
+    totals = {}
+    for path in dict.fromkeys(output_path(cfg, d) for d in dates):
+        if not os.path.exists(path):
+            continue
+        for e in read_entries(path):
+            if start <= e["Date"] <= end:
+                cats = totals.setdefault(e.get("Project", "?"), {})
+                cat = e.get("Category", "?")
+                cats[cat] = cats.get(cat, 0) + e["Hours"] * 60 + e["Minutes"]
+
+    print(f"{BOLD}{title}{RESET}\n")
+    if not totals:
+        print(f"{DIM}  No entries logged {'this ' + period} yet.{RESET}")
+        return
+    rows = []  # (name, minutes, is_project)
+    for project, cats in sorted(totals.items(), key=lambda kv: -sum(kv[1].values())):
+        rows.append((project, sum(cats.values()), True))
+        rows += [(f"  {cat}", mins, False) for cat, mins in sorted(cats.items(), key=lambda kv: -kv[1])]
+    total = sum(sum(c.values()) for c in totals.values())
+    width = max(len(name) for name, _, _ in rows + [("Total", 0, 0)]) + 4
+    for name, mins, is_project in rows:
+        style = BOLD if is_project else ""
+        print(f"  {style}{name:<{width}}{fmt_minutes(mins):>6}{RESET}")
+    print(f"  {DIM}{'─' * (width + 6)}{RESET}")
+    print(f"  {BOLD}{GREEN}{'Total':<{width}}{fmt_minutes(total):>6}{RESET}")
 
 
 def copy_to_clipboard(text):
@@ -760,7 +905,7 @@ def show_dir(cfg):
         print(f"{DIM}  (doesn't exist yet; it's created when you log your first entry){RESET}")
     tool = copy_to_clipboard(folder)
     if tool:
-        print(f"{GREEN}✔ Copied to clipboard{RESET}")
+        print(f"{GREEN}✔ Copied folder path to clipboard{RESET}")
     else:
         print(f"{DIM}  No clipboard tool found (install wl-clipboard, xclip or xsel); copy the path above.{RESET}")
 
@@ -785,6 +930,9 @@ def main(argv):
         return
     if "--export" in argv:
         show_dir(cfg)
+        return
+    if "--hours" in argv or any(a in HOURS_FLAGS for a in argv):
+        show_hours(cfg, next((HOURS_FLAGS[a] for a in argv if a in HOURS_FLAGS), None))
         return
     log_entry(cfg)
 

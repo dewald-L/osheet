@@ -43,7 +43,7 @@ Prompts for:
 
 Answers fill in a panel at the top (`Day`, `Project`, `Entry type`, `Time`, `Location`, `Description`) that updates in place, with the current question shown below it; when you're done, only the completed panel and the saved file path stay in the terminal. Setup works the same way for the template and defaults. Without a TTY (piped input) the questions and answers are printed as plain lines instead.
 
-In menus: ↑/↓ to move, Enter to select, type to filter, digits to jump.
+In menus: ↑/↓ or `j`/`k` to move, Enter or an option's number to select, type to filter. Choose `0. ← Back` (or type `<` and Enter at a text question) to go back to the previous question.
 
 ## Output
 
@@ -59,6 +59,14 @@ Set `OSHEET_FILE` to write a single run to one specific file instead. The file s
 Files are stored in a `<yyyy_Month>` folder per month (e.g. `2026_October`); a week that spans two months is filed under the month its Monday falls in. A new file is created from the template whenever an entry falls in a new week or month.
 
 Upgrading from an earlier version: osheet asks once how to group files, then moves entries from the old CSV or single Excel file into the grouped files and keeps the old file as `.bak`.
+
+### Hours summary
+
+```bash
+osheet --hours
+```
+
+Asks whether to show this week (Mon–Sun) or this month, then lists the time logged per project and entry type, with a total. Use `osheet --hours-week` or `osheet --hours-month` to skip the question.
 
 ### Finding the file
 
