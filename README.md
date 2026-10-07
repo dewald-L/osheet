@@ -15,7 +15,7 @@ Requires Python 3.8+ (standard library only). On Windows, menus fall back to num
 The first time you run `osheet` it walks you through setup, then exits; run `osheet` again to log entries. Re-run setup any time with `osheet --setup`:
 
 1. Asks for your `TimesheetUpload.xlsx` template and reads its columns, projects, entry types, billable flags, locations and sentiments.
-2. Proposes default project, entry type, location, sentiment and output CSV; confirm them or change them.
+2. Proposes default project, entry type, location, sentiment, file grouping (by week or by month) and output location; confirm them or change them.
 3. Saves everything to the config file:
 
 | OS | Config file |
@@ -45,11 +45,18 @@ In menus: ↑/↓ to move, Enter to select, type to filter, digits to jump.
 
 ## Output
 
-Entries are appended to the Excel file chosen during setup (default `~/timesheets/TimesheetUpload.xlsx`; override per run with `OSHEET_FILE`). The file starts as a copy of your template, so the Lookup/Validation sheets, dropdowns and table are preserved; each entry becomes a new row in the `TimesheetEntry` table, with the date stored as a real Excel date.
+Entries go into one Excel file per week or per month, depending on the grouping chosen during setup, based on the entry's date:
 
-Start a fresh file (e.g. after uploading) by moving or deleting the old one; the next entry creates a new one from the template.
+| Grouping | Example file |
+|---|---|
+| Week (Mon–Sun, ISO week number) | `~/timesheets/TimesheetUpload_2026-W41.xlsx` |
+| Month | `~/timesheets/TimesheetUpload_2026-10.xlsx` |
 
-If you used an earlier CSV version of osheet, its entries are moved into the Excel file automatically and the CSV is kept as `.csv.bak`.
+Set `OSHEET_FILE` to write a single run to one specific file instead. The file starts as a copy of your template, so the Lookup/Validation sheets, dropdowns and table are preserved; each entry becomes a new row in the `TimesheetEntry` table, with the date stored as a real Excel date.
+
+A new file is created from the template whenever an entry falls in a new week or month.
+
+Upgrading from an earlier version: osheet asks once how to group files, then moves entries from the old CSV or single Excel file into the grouped files and keeps the old file as `.bak`.
 
 ### Finding the file
 

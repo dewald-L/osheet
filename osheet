@@ -279,6 +279,72 @@ def append_rows(path, template, entries):
     os.replace(tmp, path)
 
 
+GROUP_OPTIONS = {
+    "week": "Week (one file per Mon–Sun week)",
+    "month": "Month (one file per calendar month)",
+}
+
+
+def ask_group_by(current="week"):
+    labels = list(GROUP_OPTIONS.values())
+    choice = select("Would you like to group timesheet export files by week, or by month?",
+                    labels, pick(list(GROUP_OPTIONS), current))
+    return list(GROUP_OPTIONS)[labels.index(choice)]
+
+
+def group_label(group_by, date):
+    if group_by == "month":
+        return f"{date:%Y-%m}"
+    year, week, _ = date.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def output_path(cfg, date=None):
+    """The Excel file an entry for `date` goes into (OSHEET_FILE overrides grouping)."""
+    if os.environ.get("OSHEET_FILE"):
+        return os.path.abspath(os.path.expanduser(os.environ["OSHEET_FILE"]))
+    base = os.path.abspath(os.path.expanduser(cfg["output"]))
+    if date is None or not cfg.get("group_by"):
+        return base
+    stem, ext = os.path.splitext(base)
+    return f"{stem}_{group_label(cfg['group_by'], date)}{ext}"
+
+
+def save_entries(cfg, entries):
+    """Append entries to their (grouped) files. Returns the paths written."""
+    by_path = {}
+    for e in entries:
+        by_path.setdefault(output_path(cfg, e["Date"]), []).append(e)
+    for path, group in by_path.items():
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        append_rows(path, template_path(cfg), group)
+    return list(by_path)
+
+
+def migrate_ungrouped(cfg):
+    """One-off: split a single pre-grouping Excel file into week/month files."""
+    old = os.path.abspath(os.path.expanduser(cfg["output"]))
+    if os.environ.get("OSHEET_FILE") or not cfg.get("group_by") or not os.path.exists(old):
+        return
+    sheets = read_xlsx(old)
+    rows = next(r for name, r in sheets.items() if name not in ("Lookup", "Validation"))
+    headers = rows[0]
+    entries = []
+    for row in rows[1:]:
+        e = {headers[col]: val for col, val in row.items() if col in headers}
+        if not e.get("Date"):
+            continue
+        e["Date"] = EXCEL_EPOCH + dt.timedelta(days=int(float(e["Date"])))
+        for k in ("Hours", "Minutes"):
+            e[k] = int(float(e.get(k) or 0))
+        entries.append(e)
+    paths = save_entries(cfg, entries)
+    os.replace(old, old + ".bak")
+    where = ", ".join(os.path.basename(p) for p in paths) or "nowhere (it was empty)"
+    print(f"{DIM}Moved {len(entries)} entries from {os.path.basename(old)} into {where} "
+          f"(old file kept as {os.path.basename(old)}.bak){RESET}\n")
+
+
 def migrate_csv(cfg):
     """One-off: move entries from an old CSV output into the Excel file."""
     old = os.path.expanduser(cfg["output"])
@@ -292,12 +358,10 @@ def migrate_csv(cfg):
             e["Date"] = dt.date.fromisoformat(e["Date"])
             for k in ("Hours", "Minutes"):
                 e[k] = int(e[k])
-        new = output_path(cfg)
-        os.makedirs(os.path.dirname(new), exist_ok=True)
-        if entries:
-            append_rows(new, template_path(cfg), entries)
+        paths = save_entries(cfg, entries)
         os.replace(old, old + ".bak")
-        print(f"{DIM}Moved {len(entries)} entries from {old} → {new} (old file kept as .csv.bak){RESET}\n")
+        where = ", ".join(paths) or "nowhere (it was empty)"
+        print(f"{DIM}Moved {len(entries)} entries from {old} → {where} (old file kept as .csv.bak){RESET}\n")
     save_config(cfg)
     return cfg
 
@@ -445,25 +509,30 @@ def setup(existing=None):
                                              pick(data["sentiments"], "Neutral"))],
     }
     output = existing.get("output", DEFAULT_OUTPUT)
+    group_by = existing.get("group_by", "week")
 
     while True:
+        stem, ext = os.path.splitext(output)
+        example = f"{stem}_{group_label(group_by, dt.date.today())}{ext}"
         print(f"{BOLD}Defaults:{RESET}")
         print(f"  Project     {CYAN}{defaults['project']}{RESET}")
         print(f"  Entry type  {CYAN}{defaults['category']}{RESET}")
         print(f"  Location    {CYAN}{defaults['location']}{RESET}")
         print(f"  Sentiment   {CYAN}{defaults['sentiment']}{RESET}")
-        print(f"  Save to     {CYAN}{output}{RESET}\n")
+        print(f"  Group files {CYAN}by {group_by}{RESET}")
+        print(f"  Save to     {CYAN}{example}{RESET} {DIM}(e.g.){RESET}\n")
         answer = select("Use these defaults?", ["Yes, save", "Change them"])
         if answer.startswith("Yes"):
             break
         defaults = choose_defaults(data, defaults)
-        output = ask("Save entries to which Excel file?", output)
+        group_by = ask_group_by(group_by)
+        output = ask("Save entries as? (the week/month is added to the name)", output)
         if not output.lower().endswith(".xlsx"):
             output += ".xlsx"
         print()
 
     store_template(template)
-    cfg = {"template": template, "output": output, "defaults": defaults, **data}
+    cfg = {"template": template, "output": output, "group_by": group_by, "defaults": defaults, **data}
     save_config(cfg)
     print(f"{GREEN}✔ Config saved{RESET} {DIM}→ {CONFIG_PATH}{RESET}\n")
     print(f"You're all set. Log a timesheet entry by running: {BOLD}osheet{RESET}")
@@ -515,16 +584,10 @@ def log_entry(cfg):
         "Description": description, "TicketNumber": "", "Sentiment": defaults["sentiment"],
         "WorkedFrom": location,
     }
-    path = output_path(cfg)
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    append_rows(path, template_path(cfg), [values])
+    path, = save_entries(cfg, [values])
 
     print(f"\n{GREEN}✔ Saved{RESET} {date:%a %d %b} · {project} / {category} · {hours}h{mins:02d} · {location}")
     print(f"{DIM}  → {path}{RESET}")
-
-
-def output_path(cfg):
-    return os.path.abspath(os.path.expanduser(os.environ.get("OSHEET_FILE") or cfg["output"]))
 
 
 def copy_to_clipboard(text):
@@ -568,8 +631,13 @@ def main(argv):
         print(__doc__.strip())
         return
     cfg = load_config()
+    if cfg is not None and "group_by" not in cfg:
+        cfg["group_by"] = ask_group_by()
+        save_config(cfg)
+        print()
     if cfg is not None:
         cfg = migrate_csv(cfg)
+        migrate_ungrouped(cfg)
     if cfg is None or "--setup" in argv:
         if cfg is None:
             print("No config found, let's set osheet up first.\n")
