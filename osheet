@@ -485,6 +485,11 @@ def select_numbered(question, options, default=0):
     return options[int(ans) - 1] if ans.isdigit() and 0 < int(ans) <= len(options) else options[default]
 
 
+def shortcuts(hint):
+    """`hint` (a line of key shortcuts) under a blank line and a separator as wide as the panel."""
+    return ["", f"{DIM}{'─' * Form.width()}{RESET}", hint]
+
+
 def _menu_loop(fd, options, default, draw, window=10, back=False, checked=None, actions=None):
     """Arrow-key menu: ↑/↓ or j/k move, space/enter or a number picks that option.
     With `checked` (a list of bools, changed in place) it is a checklist instead: space or a
@@ -513,8 +518,7 @@ def _menu_loop(fd, options, default, draw, window=10, back=False, checked=None, 
         else:
             keys = "".join(f" · {k.decode()} {name}" for k, name in (actions or {}).items())
             hint = f"{DIM}  ↑/↓ or j/k move · space, enter or number select{keys}{RESET}"
-        lines.append(hint)
-        draw(lines)
+        draw(lines + shortcuts(hint))
 
         k = read_key(fd)
         typed, number = number, ""
@@ -716,7 +720,7 @@ class Form:
         self.active = key
         header = f"{BOLD}{MAGENTA}? {question}{RESET}"
         size = shutil.get_terminal_size()
-        room = (size.lines - len(self.render(self.width())) - 6 - self.can_back
+        room = (size.lines - len(self.render(self.width())) - 8 - self.can_back
                 - (len(wrap(header, size.columns - 1)) - 1))
 
         def draw(lines):
@@ -759,7 +763,7 @@ class Form:
     def keypress(self, question, hint, keys):
         """Wait for one of `keys` (TTY only), with `question` and `hint` drawn under the panel."""
         self.active = None
-        self.redraw([f"{BOLD}{MAGENTA}? {question}{RESET}", f"{DIM}  {hint}{RESET}"])
+        self.redraw([f"{BOLD}{MAGENTA}? {question}{RESET}"] + shortcuts(f"{DIM}  {hint}{RESET}"))
         fd = sys.stdin.fileno()
         old = termios.tcgetattr(fd)
         tty.setcbreak(fd)
