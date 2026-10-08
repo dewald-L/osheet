@@ -3,11 +3,12 @@
 
 Usage:
     osheet                log an entry (runs setup instead if there is no config yet)
+    osheet -m, --multi    log several entries in a row, asking after each whether to add another
     osheet -s, --setup    (re)run the configuration step
     osheet -e, --export   copy the timesheet folder path to the clipboard
     osheet -v, --view     view, change or delete an entry from the last five weeks
     osheet -H, --hours    show logged hours per category for today, this week or this month
-                          (-d/--hours-day, -w/--hours-week, -m/--hours-month skip the question)
+                          (--hours-day, --hours-week, --hours-month skip the question)
     osheet -h, --help     show this help
 """
 
@@ -1118,8 +1119,10 @@ def entry_summary(date, project, category, hours, mins, location):
     return f"{date:%a %d %b} · {project} / {category} · {hours}h{mins:02d} · {location}"
 
 
-def log_entry(cfg):
-    st = {"days": week_of(dt.date.today())}
+def log_entry(cfg, st=None):
+    """Ask for one entry and save it. Answers already in `st` are pre-selected."""
+    st = st if st is not None else {}
+    st["days"] = week_of(dt.date.today())
     with Form(ENTRY_FIELDS) as form:
         form.run(entry_steps(cfg, form, st, ask_flags(cfg)))
 
@@ -1129,6 +1132,45 @@ def log_entry(cfg):
     say(f"\n{GREEN}✔ Saved{RESET} " + entry_summary(st["date"], st["project"], st["category"],
                                                     st["hours"], st["mins"], st["location"]))
     say(f"{DIM}  → {path}{RESET}")
+
+
+def another_entry():
+    """Ask whether to log another entry (--multi). End of input counts as no."""
+    question = "Log another entry? (Y/n)"
+    with Form([]) as form:
+        if form.live:
+            return form.keypress(question, "y or enter another · n or q done",
+                                 {b"y", b"Y", b"n", b"N", b"q", b"\r", b"\n"}) in (b"y", b"Y", b"\r", b"\n")
+        try:
+            return ask(question).lower() in ("", "y", "yes")
+        except EOFError:
+            print()
+            return False
+
+
+def log_entries(cfg):
+    """--multi: log entries until the user says no. Each new entry starts from the previous
+    one's day, project, entry type and location; the time and description are asked afresh."""
+    saved = 0
+    try:
+        while True:
+            st = {} if not saved else {k: st[k] for k in ("date", "project", "category", "location")}
+            log_entry(cfg, st)
+            saved += 1
+            if not another_entry():
+                break
+            print()
+    except (KeyboardInterrupt, EOFError):
+        if not saved:
+            raise
+        say(f"\nCancelled, the current entry wasn't saved ({entries_text(saved)} saved before it).")
+        sys.exit(130)
+    if saved > 1:
+        say(f"\n{GREEN}✔ {entries_text(saved)} saved{RESET}")
+
+
+def entries_text(n):
+    return f"{n} entr{'y' if n == 1 else 'ies'}"
 
 
 # --- view entries ----------------------------------------------------------
@@ -1267,9 +1309,8 @@ def _view_form(cfg, found, changed=None):
 # --- hours summary ---------------------------------------------------------
 
 HOURS_FLAGS = {"--hours-day": "day", "--hours-week": "week", "--hours-month": "month"}
-KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--view", "--hours", *HOURS_FLAGS}
-SHORT_FLAGS = {"-s": "--setup", "-e": "--export", "-v": "--view", "-H": "--hours",
-               "-d": "--hours-day", "-w": "--hours-week", "-m": "--hours-month"}
+KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--view", "--hours", "--multi", *HOURS_FLAGS}
+SHORT_FLAGS = {"-s": "--setup", "-m": "--multi", "-e": "--export", "-v": "--view", "-H": "--hours"}
 
 
 def fmt_minutes(total):
@@ -1440,6 +1481,9 @@ def main(argv):
         return
     if "--hours" in argv or any(a in HOURS_FLAGS for a in argv):
         show_hours(cfg, next((HOURS_FLAGS[a] for a in argv if a in HOURS_FLAGS), None))
+        return
+    if "--multi" in argv:
+        log_entries(cfg)
         return
     log_entry(cfg)
 

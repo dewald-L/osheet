@@ -47,6 +47,14 @@ An unrecognised argument prints an error and exits with status 2 without logging
 
 In menus: ↑/↓ or `j`/`k` to move, Space, Enter or an option's number to select, type to filter. In checklists (setup's "asked every time" question), Space or a number toggles an option and Enter submits. Choose `0. ← Back` (or type `<` and Enter at a text question) to go back to the previous question.
 
+### Logging several entries
+
+```bash
+osheet --multi    # or -m
+```
+
+Keeps osheet open: after each entry is saved it asks `Log another entry? (Y/n)`. Press `y` or Enter to log another, or `n` or `q` to finish. Each new entry starts with the previous entry's day, project, entry type and location selected. The time and description are blank again. Each entry is saved as soon as it's done, so Ctrl+C only drops the entry in progress. Without a TTY, type `y`, `n` or nothing (counts as yes); the end of input finishes.
+
 ### Skipping questions
 
 Each question has an `ask_every_time` flag in the config file (all `true` by default). Set one to `false` to skip that question and use its default instead:
@@ -110,7 +118,7 @@ Without a TTY the details are printed as plain lines, followed by a question whe
 osheet --hours    # or -H
 ```
 
-Asks whether to show today, this week (Mon–Sun) or this month, then shows a table of the time logged per project and entry type, with subtotals for projects that have more than one type and an overall total. Use `osheet --hours-day` (`-d`), `osheet --hours-week` (`-w`) or `osheet --hours-month` (`-m`) to skip the question.
+Asks whether to show today, this week (Mon–Sun) or this month, then shows a table of the time logged per project and entry type, with subtotals for projects that have more than one type and an overall total. Use `osheet --hours-day`, `osheet --hours-week` or `osheet --hours-month` to skip the question.
 
 ### Finding the file
 
