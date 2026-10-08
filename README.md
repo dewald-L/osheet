@@ -99,7 +99,7 @@ Upgrading from an earlier version: osheet asks once how to group files, then mov
 osheet --list     # or -l
 ```
 
-Lists the entries from this week and the four before it, newest first. Pick one to see all its details in the panel, including the full description, billable flag, sentiment, ticket number and the file it's in. Then press:
+Shows a table of the time logged on each day of the current month, one row per week (oldest first, labelled with its first and last day in the month, e.g. `05–11 Oct`, with week totals, today highlighted, and Saturday/Sunday only when there are weekend entries), followed by the month's total. Days of a week that fall outside the month are left blank and not counted. Below it, the entries from this week and the four before it are listed, newest first. Pick one to see all its details in the panel, including the full description, billable flag, sentiment, ticket number and the file it's in. Then press:
 
 | Key | Action |
 |---|---|
