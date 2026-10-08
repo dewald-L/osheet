@@ -39,9 +39,10 @@ Prompts for:
 3. **Entry type** (category), filtered by project; Billable is set from the project
 4. **Total time**: `1:20`, `1h20`, `80m`, `1.5` or `90`; rounded **up** to the next 15 minutes
 5. **Location** (WorkedFrom), using the options from the template
-6. **Description**: required, up to 255 characters
+6. **Sentiment**, using the options from the template; not asked by default (see [Skipping questions](#skipping-questions)), so your default sentiment is used
+7. **Description**: required, up to 255 characters
 
-Answers fill in a panel at the top (`Day`, `Project`, `Entry type`, `Time`, `Location`, `Description`) that updates in place, with the current question shown below it; when you're done, only the completed panel and the saved file path stay in the terminal. Setup works the same way for the template and defaults. Text that doesn't fit the terminal's width wraps onto the next line (the panel, questions, menus, messages and the `--hours` table). Without a TTY (piped input) the questions and answers are printed as plain lines instead.
+Answers fill in a panel at the top (`Day`, `Project`, `Entry type`, `Time`, `Location`, `Sentiment`, `Description`) that updates in place, with the current question shown below it; when you're done, only the completed panel and the saved file path stay in the terminal. Setup works the same way for the template and defaults. Text that doesn't fit the terminal's width wraps onto the next line (the panel, questions, menus, messages and the `--hours` table). Without a TTY (piped input) the questions and answers are printed as plain lines instead.
 
 An unrecognised argument prints an error and exits with status 2 without logging anything.
 
@@ -53,11 +54,11 @@ In menus: ↑/↓ or `j`/`k` to move, Space, Enter or an option's number to sele
 osheet --multi    # or -m
 ```
 
-Keeps osheet open: after each entry is saved it asks `Log another entry? (Y/n)`. Press `y` or Enter to log another, or `n` or `q` to finish. Each new entry starts with the previous entry's day, project, entry type and location selected. The time and description are blank again. Each entry is saved as soon as it's done, so Ctrl+C only drops the entry in progress. Without a TTY, type `y`, `n` or nothing (counts as yes); the end of input finishes.
+Keeps osheet open: after each entry is saved it asks `Log another entry? (Y/n)`. Press `y` or Enter to log another, or `n` or `q` to finish. Each new entry starts with the previous entry's day, project, entry type, location and sentiment selected. The time and description are blank again. Each entry is saved as soon as it's done, so Ctrl+C only drops the entry in progress. Without a TTY, type `y`, `n` or nothing (counts as yes); the end of input finishes.
 
 ### Skipping questions
 
-Each question has an `ask_every_time` flag in the config file (all `true` by default). Set one to `false` to skip that question and use its default instead:
+Every question except the description has an `ask_every_time` flag in the config file (all `true` by default except `sentiment`). Set one to `false` to skip that question and use its default instead, or `true` to ask it. Setup's "Ask every time" checklist sets the same flags:
 
 ```json
 "ask_every_time": {
@@ -66,17 +67,17 @@ Each question has an `ask_every_time` flag in the config file (all `true` by def
   "category": false,
   "time": true,
   "location": false,
-  "description": false
+  "sentiment": true
 }
 ```
 
 | Question | Default used when skipped |
 |---|---|
 | `day` | today |
-| `project`, `category`, `location` | the value in `defaults` (still asked if it isn't valid, e.g. the entry type doesn't belong to the chosen project) |
+| `project`, `category`, `location`, `sentiment` | the value in `defaults` (still asked if it isn't valid, e.g. the entry type doesn't belong to the chosen project) |
 | `time` | `defaults.time` (e.g. `"time": "1h"`); still asked if that isn't set |
-| `description` | `defaults.description`; still asked if that isn't set or is over 255 characters |
-Skipped answers still show in the panel, marked `(skipped)`, and Back passes over them.
+
+The description is always asked and has no flag. Skipped answers still show in the panel, marked `(skipped)`, and Back passes over them.
 
 ## Output
 
@@ -99,7 +100,7 @@ Upgrading from an earlier version: osheet asks once how to group files, then mov
 osheet --list     # or -l
 ```
 
-Shows a table of the time logged on each day of the current month, one row per week (oldest first, labelled with its first and last day in the month, e.g. `05–11 Oct`, with week totals, today highlighted, and Saturday/Sunday only when there are weekend entries), followed by the month's total. Days of a week that fall outside the month are left blank and not counted. Below it, pick one of the month's weeks that has entries (each shown with its number of entries and total time); its entries are then listed, newest first, and Back returns to the week question. In the list, `e` or `d` edits or deletes the highlighted entry straight away (as below; Back from the first edit question returns to the list), and `n` logs a new entry, asking the same questions as `osheet` (Back from its first question returns to the list). Pick one to see all its details in the panel, including the full description, billable flag, sentiment, ticket number and the file it's in. Then press:
+Shows a table of the time logged on each day of the current month, one row per week (oldest first, labelled with its first and last day in the month, e.g. `05–11 Oct`, with week totals, today highlighted, and Saturday/Sunday only when there are weekend entries), followed by the month's total. Days of a week that fall outside the month are left blank and not counted. Below it, pick one of the month's weeks that has entries (each shown with its number of entries and total time); its entries are then listed, newest first, and Back returns to the week question. In the list, `e` or `d` edits or deletes the highlighted entry straight away (as below; Back from the first edit question returns to the list), and `n` logs a new entry, asking the same questions as `osheet` (Back from its first question returns to the list). Pick one to see all its details in the panel, including the full description, billable flag, ticket number and the file it's in. Then press:
 
 | Key | Action |
 |---|---|
@@ -108,7 +109,7 @@ Shows a table of the time logged on each day of the current month, one row per w
 | `0` or `b` | back to the list |
 | Enter or `q` | finish |
 
-When editing, the day can be moved within the entry's own week; the row is updated in place, or moved to another file if the new day belongs to a different week or month. The sentiment and ticket number are kept as they were. Once an edit, delete or new entry is saved you return to the list of that entry's week, with a changed or new entry highlighted.
+When editing, the day can be moved within the entry's own week; the row is updated in place, or moved to another file if the new day belongs to a different week or month. The ticket number is kept as it was. Once an edit, delete or new entry is saved you return to the list of that entry's week, with a changed or new entry highlighted.
 
 Without a TTY the details are printed as plain lines, followed by a question where `e` edits the entry and `d` deletes it; osheet exits after the change is saved.
 

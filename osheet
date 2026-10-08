@@ -992,17 +992,20 @@ def _setup_form(form, existing):
 # --- log entry -------------------------------------------------------------
 
 ENTRY_FIELDS = [("day", "Day"), ("project", "Project"), ("category", "Entry type"),
-                ("time", "Time"), ("location", "Location"), ("description", "Description")]
+                ("time", "Time"), ("location", "Location"), ("sentiment", "Sentiment"),
+                ("description", "Description")]
 
 
 # Questions that can be skipped; the description is always asked
 ASK_FIELDS = [(key, label) for key, label in ENTRY_FIELDS if key != "description"]
+# Questions skipped unless `ask_every_time` turns them on
+NOT_ASKED_BY_DEFAULT = {"sentiment"}
 
 
 def ask_flags(cfg):
     """`ask_every_time` per entry question; a question set to false is answered with its default."""
     flags = cfg.get("ask_every_time", {})
-    return {key: flags.get(key, True) is not False for key, _ in ASK_FIELDS}
+    return {key: flags.get(key, key not in NOT_ASKED_BY_DEFAULT) is not False for key, _ in ASK_FIELDS}
 
 
 # Panel note for a question answered with its default because it isn't asked every time
@@ -1138,20 +1141,29 @@ def entry_steps(cfg, form, st, asking):
                                      pick(cfg["locations"], st.get("location"),
                                           pick(cfg["locations"], defaults["location"])))
 
+    def sentiment():
+        sentiments = cfg.get("sentiments") or DEFAULT_SENTIMENTS
+        if not asking["sentiment"] and defaults["sentiment"] in sentiments:
+            st["sentiment"] = defaults["sentiment"]
+            form.set("sentiment", st["sentiment"], SKIPPED)
+            return SKIP
+        st["sentiment"] = form.select("sentiment", "How did it go?", sentiments,
+                                      pick(sentiments, st.get("sentiment"), pick(sentiments, defaults["sentiment"])))
+
     def description():
         st["description"] = form.ask("description", "Description? (max 255 characters)",
                                      st.get("description", ""), check=check_description,
                                      prefill=st.get("prefill", False))
 
-    return [day, project, category, time, location, description]
+    return [day, project, category, time, location, sentiment, description]
 
 
-def entry_values(cfg, st, sentiment, ticket=""):
+def entry_values(cfg, st, ticket=""):
     """Row values (keyed by column header) for the answers in `st`."""
     return {
         "Date": st["date"], "Project": st["project"], "Category": st["category"],
         "Hours": st["hours"], "Minutes": st["mins"], "Billable": cfg["projects"][st["project"]]["billable"],
-        "Description": st["description"], "TicketNumber": ticket, "Sentiment": sentiment,
+        "Description": st["description"], "TicketNumber": ticket, "Sentiment": st["sentiment"],
         "WorkedFrom": st["location"],
     }
 
@@ -1168,7 +1180,7 @@ def log_entry(cfg, st=None):
         form.run(entry_steps(cfg, form, st, ask_flags(cfg)))
 
     # Store
-    path, = save_entries(cfg, [entry_values(cfg, st, cfg["defaults"]["sentiment"])])
+    path, = save_entries(cfg, [entry_values(cfg, st)])
 
     say(f"\n{GREEN}✔ Saved{RESET} " + entry_summary(st["date"], st["project"], st["category"],
                                                     st["hours"], st["mins"], st["location"]))
@@ -1191,11 +1203,11 @@ def another_entry():
 
 def log_entries(cfg):
     """--multi: log entries until the user says no. Each new entry starts from the previous
-    one's day, project, entry type and location; the time and description are asked afresh."""
+    one's day, project, entry type, location and sentiment; the time and description are asked afresh."""
     saved = 0
     try:
         while True:
-            st = {} if not saved else {k: st[k] for k in ("date", "project", "category", "location")}
+            st = {} if not saved else {k: st[k] for k in ("date", "project", "category", "location", "sentiment")}
             log_entry(cfg, st)
             saved += 1
             if not another_entry():
@@ -1217,7 +1229,7 @@ def entries_text(n):
 # --- view entries ----------------------------------------------------------
 
 # Extra panel rows shown while viewing an entry (dropped again when editing it)
-VIEW_FIELDS = [("billable", "Billable"), ("sentiment", "Sentiment"), ("ticket", "Ticket"), ("file", "File")]
+VIEW_FIELDS = [("billable", "Billable"), ("ticket", "Ticket"), ("file", "File")]
 
 
 def month_range(today=None):
@@ -1343,7 +1355,7 @@ def _view_form(cfg, found, changed=None):
     def show_fields():
         e = st["entry"]
         form.fields = ENTRY_FIELDS + VIEW_FIELDS
-        for key, col in (("billable", "Billable"), ("sentiment", "Sentiment"), ("ticket", "TicketNumber")):
+        for key, col in (("billable", "Billable"), ("ticket", "TicketNumber")):
             form.set(key, str(e.get(col, "")))
         form.set("file", st["path"].replace(os.path.expanduser("~"), "~", 1))
 
@@ -1398,10 +1410,11 @@ def _view_form(cfg, found, changed=None):
         st.update(label=label, path=path, entry=e, prefill=True, days=week_of(e["Date"]), date=e["Date"],
                   project=e.get("Project", ""), category=e.get("Category", ""),
                   time=f"{e['Hours']}h{e['Minutes']:02d}", location=e.get("WorkedFrom", ""),
-                  description=e.get("Description", ""))
+                  sentiment=e.get("Sentiment", ""), description=e.get("Description", ""))
         for key, value in (("day", f"{e['Date']:%A %d %b}"), ("project", st["project"]),
                            ("category", st["category"]), ("time", st["time"]),
-                           ("location", st["location"]), ("description", st["description"])):
+                           ("location", st["location"]), ("sentiment", st["sentiment"]),
+                           ("description", st["description"])):
             form.set(key, value)
 
     def show():
@@ -1443,7 +1456,7 @@ def _view_form(cfg, found, changed=None):
     if st.get("viewed"):
         return None
     if st.get("new"):
-        path, = save_entries(cfg, [entry_values(cfg, st, cfg["defaults"]["sentiment"])])
+        path, = save_entries(cfg, [entry_values(cfg, st)])
         say(f"\n{GREEN}✔ Saved{RESET} " + entry_summary(st["date"], st["project"], st["category"],
                                                         st["hours"], st["mins"], st["location"]))
         say(f"{DIM}  → {path}{RESET}")
@@ -1456,7 +1469,7 @@ def _view_form(cfg, found, changed=None):
                                                         e["Hours"], e["Minutes"], e.get("WorkedFrom", "?")))
         say(f"{DIM}  from {path}{RESET}")
         return "deleted"
-    values = entry_values(cfg, st, e.get("Sentiment", cfg["defaults"]["sentiment"]), e.get("TicketNumber", ""))
+    values = entry_values(cfg, st, e.get("TicketNumber", ""))
     row = e["_row"]
     if output_path(cfg, st["date"]) == path:
         update_row(path, template, row, values)
