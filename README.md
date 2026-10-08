@@ -96,7 +96,7 @@ Upgrading from an earlier version: osheet asks once how to group files, then mov
 ### Viewing and editing entries
 
 ```bash
-osheet --view     # or -v
+osheet --list     # or -l
 ```
 
 Lists the entries from this week and the four before it, newest first. Pick one to see all its details in the panel, including the full description, billable flag, sentiment, ticket number and the file it's in. Then press:

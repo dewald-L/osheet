@@ -6,7 +6,7 @@ Usage:
     osheet -m, --multi    log several entries in a row, asking after each whether to add another
     osheet -s, --setup    (re)run the configuration step
     osheet -e, --export   copy the timesheet folder path to the clipboard
-    osheet -v, --view     view, change or delete an entry from the last five weeks
+    osheet -l, --list     view, change or delete an entry from the last five weeks
     osheet -H, --hours    show logged hours per category for today, this week or this month
                           (--hours-day, --hours-week, --hours-month skip the question)
     osheet -h, --help     show this help
@@ -1309,8 +1309,8 @@ def _view_form(cfg, found, changed=None):
 # --- hours summary ---------------------------------------------------------
 
 HOURS_FLAGS = {"--hours-day": "day", "--hours-week": "week", "--hours-month": "month"}
-KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--view", "--hours", "--multi", *HOURS_FLAGS}
-SHORT_FLAGS = {"-s": "--setup", "-m": "--multi", "-e": "--export", "-v": "--view", "-H": "--hours"}
+KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--list", "--hours", "--multi", *HOURS_FLAGS}
+SHORT_FLAGS = {"-s": "--setup", "-m": "--multi", "-e": "--export", "-l": "--list", "-H": "--hours"}
 
 
 def fmt_minutes(total):
@@ -1476,7 +1476,7 @@ def main(argv):
     if "--export" in argv:
         show_dir(cfg)
         return
-    if "--view" in argv:
+    if "--list" in argv:
         view_entry(cfg)
         return
     if "--hours" in argv or any(a in HOURS_FLAGS for a in argv):
