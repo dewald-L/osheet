@@ -85,13 +85,24 @@ Only the folder is configurable; files are named after their week or month. They
 
 Upgrading from an earlier version: osheet asks once how to group files, then moves entries from the old CSV or single Excel file into the grouped files and keeps the old file as `.bak`. Files from earlier versions named `<name>_<period>.xlsx` (or with the old `dd-dd_MM` week label) are renamed to the current names on the next run.
 
-### Editing entries
+### Viewing and editing entries
 
 ```bash
-osheet --edit     # or -E
+osheet --view     # or -v
 ```
 
-Lists the entries from this week and the four before it, newest first, then asks whether to change or delete the one you pick. Changing it asks every question again (none are skipped), with the entry's current answers as the defaults, so press Enter to keep a value. The day can be moved within the entry's own week; the row is updated in place, or moved to another file if the new day belongs to a different week or month. Deleting asks for confirmation first, and the rows below move up. The sentiment and ticket number are kept as they were.
+Lists the entries from this week and the four before it, newest first. Pick one to see all its details in the panel, including the full description, billable flag, sentiment, ticket number and the file it's in. Then press:
+
+| Key | Action |
+|---|---|
+| `e` | edit: asks every question again (none are skipped), starting from the entry's current values: menus have its answer selected, and the time and description are already typed in, ready to edit, so press Enter to keep a value. Back from the first question returns to the entry (at a text question, clear the line with Ctrl+U before typing `<`) |
+| `d` | delete: asks `Delete this entry? (y/N)`; `y` deletes it and the rows below move up, `n` or Enter keeps it |
+| `0` or `b` | back to the list |
+| Enter or `q` | finish |
+
+When editing, the day can be moved within the entry's own week; the row is updated in place, or moved to another file if the new day belongs to a different week or month. The sentiment and ticket number are kept as they were. Once an edit or delete is saved you return to the list, with a changed entry highlighted.
+
+Without a TTY the details are printed as plain lines, followed by a question where `e` edits the entry and `d` deletes it; osheet exits after the change is saved.
 
 ### Hours summary
 

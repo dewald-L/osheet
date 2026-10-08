@@ -5,7 +5,7 @@ Usage:
     osheet                log an entry (runs setup instead if there is no config yet)
     osheet -s, --setup    (re)run the configuration step
     osheet -e, --export   copy the timesheet folder path to the clipboard
-    osheet -E, --edit     change or delete an entry from the last five weeks
+    osheet -v, --view     view, change or delete an entry from the last five weeks
     osheet -H, --hours    show logged hours per category for today, this week or this month
                           (-d/--hours-day, -w/--hours-week, -m/--hours-month skip the question)
     osheet -h, --help     show this help
@@ -612,6 +612,17 @@ def say(text=""):
     print(text)
 
 
+def _readline():
+    """The readline module when input() line editing uses it (both ends a TTY), else None."""
+    if not sys.stdout.isatty():
+        return None
+    try:
+        import readline
+    except ImportError:
+        return None
+    return readline
+
+
 class Back(Exception):
     """Raised by a Form question when the user chooses to go back."""
 
@@ -741,17 +752,43 @@ class Form:
         self._menu(key, question, options, 0, checked=checked, summary=summary)
         self.set(key, summary())
 
-    def ask(self, key, question, default="", check=None):
+    def keypress(self, question, hint, keys):
+        """Wait for one of `keys` (TTY only), with `question` and `hint` drawn under the panel."""
+        self.active = None
+        self.redraw([f"{BOLD}{MAGENTA}? {question}{RESET}", f"{DIM}  {hint}{RESET}"])
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+        sys.stdout.write("\033[?25l")
+        try:
+            while (k := read_key(fd)) not in keys:
+                pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            sys.stdout.write("\033[?25h")
+        return k
+
+    def ask(self, key, question, default="", check=None, prefill=False):
         """Text input for `key`, drawn under the panel. `check(answer)` returns the value to
-        use or raises ValueError, whose message is shown under the question before asking again."""
+        use or raises ValueError, whose message is shown under the question before asking again.
+        With `prefill` (TTY only) the default is put in the input line, ready to edit."""
         error = ""
         while True:
             if self.live:
                 self.active = key
-                suffix = f" {DIM}({default}){RESET}" if default else ""
+                rl = _readline() if prefill and default else None
+                suffix = f" {DIM}({default}){RESET}" if default and not rl else ""
                 suffix += f" {DIM}· enter < to go back{RESET}" if self.can_back else ""
                 self.redraw([f"{BOLD}{MAGENTA}? {question}{RESET}{suffix}"] + ([f"  {error}"] if error else []))
-                raw = input(f"  {CYAN}❯{RESET} ")
+                if rl:
+                    # readline must be told which prompt characters are invisible (\001…\002)
+                    rl.set_startup_hook(lambda: rl.insert_text(default))
+                    try:
+                        raw = input(f"  \001{CYAN}\002❯\001{RESET}\002 ")
+                    finally:
+                        rl.set_startup_hook()
+                else:
+                    raw = input(f"  {CYAN}❯{RESET} ")
                 # The input line (wrapped if long) now sits above the cursor too
                 self.drawn += (4 + len(raw) - 1) // shutil.get_terminal_size().columns + 1
                 if self.can_back and raw.strip() == "<":
@@ -992,7 +1029,8 @@ def week_of(date):
 
 def entry_steps(cfg, form, st, asking):
     """Form steps for the entry questions, answered into `st`. The day is picked from
-    `st["days"]`; answers already in `st` are pre-selected."""
+    `st["days"]`; answers already in `st` are pre-selected (and typed into the text
+    questions' input line when `st["prefill"]`)."""
     defaults = cfg["defaults"]
     today = dt.date.today()
     projects = list(cfg["projects"])
@@ -1037,7 +1075,7 @@ def entry_steps(cfg, form, st, asking):
         skipped = minutes is not None
         if not skipped:
             minutes = form.ask("time", "Total time spent? (e.g. 1:20, 1h20, 80m, 1.5)", st.get("time", ""),
-                               check=check_duration)
+                               check=check_duration, prefill=st.get("prefill", False))
         rounded = math.ceil(minutes / 15) * 15
         st["hours"], st["mins"] = divmod(rounded, 60)
         st["time"] = f"{st['hours']}h{st['mins']:02d}"
@@ -1060,7 +1098,8 @@ def entry_steps(cfg, form, st, asking):
 
     def description():
         st["description"] = form.ask("description", "Description? (max 255 characters)",
-                                     st.get("description", ""), check=check_description)
+                                     st.get("description", ""), check=check_description,
+                                     prefill=st.get("prefill", False))
 
     return [day, project, category, time, location, description]
 
@@ -1092,9 +1131,12 @@ def log_entry(cfg):
     say(f"{DIM}  → {path}{RESET}")
 
 
-# --- edit entries ----------------------------------------------------------
+# --- view entries ----------------------------------------------------------
 
-EDIT_WEEKS = 5  # entries from this week and the four before it can be edited
+EDIT_WEEKS = 5  # entries from this week and the four before it can be edited or viewed
+
+# Extra panel rows shown while viewing an entry (dropped again when editing it)
+VIEW_FIELDS = [("billable", "Billable"), ("sentiment", "Sentiment"), ("ticket", "Ticket"), ("file", "File")]
 
 
 def recent_entries(cfg):
@@ -1110,12 +1152,28 @@ def recent_entries(cfg):
     return sorted(found, key=lambda pe: (pe[1]["Date"], pe[1]["_row"]), reverse=True)
 
 
-def edit_entry(cfg):
-    """Pick a recent entry, then change its answers or delete it."""
+def view_entry(cfg):
+    """Pick a recent entry and show it; e there changes its answers, d deletes it. After an edit is
+    saved the list is shown again, with a changed entry highlighted; without a TTY it ends there."""
     found = recent_entries(cfg)
-    if not found:
-        say(f"{DIM}No entries logged in the last {EDIT_WEEKS} weeks.{RESET}")
-        return
+    changed = None  # (path, row) of the entry to highlight after changing it
+    while True:
+        if not found:
+            say(f"{DIM}No entries logged in the last {EDIT_WEEKS} weeks.{RESET}")
+            return
+        done = _view_form(cfg, found, changed)
+        if done is None:
+            return
+        found = recent_entries(cfg)
+        changed = done if done != "deleted" else None
+        if not (termios is not None and sys.stdin.isatty()):
+            return
+        print()
+
+
+def _view_form(cfg, found, changed=None):
+    """One pass of `view_entry`: list, show, edit. The list starts on the entry at `changed`.
+    Returns None when done viewing, else "deleted" or the (path, row) of the changed entry."""
     labels = []
     for _, e in found:
         desc = e.get("Description", "")
@@ -1130,7 +1188,7 @@ def edit_entry(cfg):
         label = form.select(None, "Which entry?", labels, labels.index(st["label"]) if "label" in st else 0)
         path, e = found[labels.index(label)]
         st.clear()
-        st.update(label=label, path=path, entry=e, days=week_of(e["Date"]), date=e["Date"],
+        st.update(label=label, path=path, entry=e, prefill=True, days=week_of(e["Date"]), date=e["Date"],
                   project=e.get("Project", ""), category=e.get("Category", ""),
                   time=f"{e['Hours']}h{e['Minutes']:02d}", location=e.get("WorkedFrom", ""),
                   description=e.get("Description", ""))
@@ -1139,19 +1197,51 @@ def edit_entry(cfg):
                            ("location", st["location"]), ("description", st["description"])):
             form.set(key, value)
 
-    def action():
+    def show():
+        e = st["entry"]
+        form.fields = ENTRY_FIELDS + VIEW_FIELDS
+        for key, col in (("billable", "Billable"), ("sentiment", "Sentiment"), ("ticket", "TicketNumber")):
+            form.set(key, str(e.get(col, "")))
+        form.set("file", st["path"].replace(os.path.expanduser("~"), "~", 1))
+        if not form.live:
+            label_w = max(len(label) for _, label in form.fields)
+            for key, label in form.fields:
+                print(f"  {DIM}{label:<{label_w}}{RESET}  {form.values.get(key, ('', ''))[0] or '—'}")
         st["delete"] = False
-        if form.select(None, "Change or delete this entry?", ["Change it", "Delete it"]) == "Change it":
-            return None
-        if form.select(None, "Delete this entry?", ["No, keep it", "Yes, delete it"]).startswith("No"):
-            return steps.index(action)
-        st["delete"] = True
-        return len(steps)
+        while True:
+            if form.live:
+                k = form.keypress("What would you like to do?",
+                                  "e edit · d delete · 0 or b back to the list · enter or q done",
+                                  {b"e", b"E", b"d", b"D", b"0", b"b", b"q", b"\r", b"\n"}).decode().lower()
+                if k in "0b":
+                    form.fields = ENTRY_FIELDS
+                    raise Back
+            else:
+                k = ask("e to edit, d to delete, enter to finish").lower()[:1]
+            if k != "d":
+                break
+            if form.live:
+                sure = form.keypress("Delete this entry? (y/N)", "y delete · n or enter keep it",
+                                     {b"y", b"Y", b"n", b"N", b"\r", b"\n"}) in (b"y", b"Y")
+            else:
+                sure = ask("Delete this entry? (y/N)").lower() in ("y", "yes")
+            if sure:
+                st["delete"] = True
+                return len(steps)
+        if k != "e":
+            st["viewed"] = True
+            return len(steps)
+        form.fields = ENTRY_FIELDS
 
     with Form(ENTRY_FIELDS) as form:
-        steps = [choose, action] + entry_steps(cfg, form, st, {key: True for key, _ in ASK_FIELDS})
+        steps = [choose, show] + entry_steps(cfg, form, st, {key: True for key, _ in ASK_FIELDS})
+        match = [label for label, (path, e) in zip(labels, found) if (path, e["_row"]) == changed]
+        if match:
+            st["label"] = match[0]
         form.run(steps)
 
+    if st.get("viewed"):
+        return None
     path, e = st["path"], st["entry"]
     template = template_path(cfg)
     if st["delete"]:
@@ -1159,23 +1249,26 @@ def edit_entry(cfg):
         say(f"\n{GREEN}✔ Deleted{RESET} " + entry_summary(e["Date"], e.get("Project", "?"), e.get("Category", "?"),
                                                         e["Hours"], e["Minutes"], e.get("WorkedFrom", "?")))
         say(f"{DIM}  from {path}{RESET}")
-        return
+        return "deleted"
     values = entry_values(cfg, st, e.get("Sentiment", cfg["defaults"]["sentiment"]), e.get("TicketNumber", ""))
+    row = e["_row"]
     if output_path(cfg, st["date"]) == path:
-        update_row(path, template, e["_row"], values)
+        update_row(path, template, row, values)
     else:  # the new day belongs in another week's/month's file
-        update_row(path, template, e["_row"])
+        update_row(path, template, row)
         path, = save_entries(cfg, [values])
+        row = max(n["_row"] for n in read_entries(path))
     say(f"\n{GREEN}✔ Updated{RESET} " + entry_summary(st["date"], st["project"], st["category"],
                                                       st["hours"], st["mins"], st["location"]))
     say(f"{DIM}  → {path}{RESET}")
+    return path, row
 
 
 # --- hours summary ---------------------------------------------------------
 
 HOURS_FLAGS = {"--hours-day": "day", "--hours-week": "week", "--hours-month": "month"}
-KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--edit", "--hours", *HOURS_FLAGS}
-SHORT_FLAGS = {"-s": "--setup", "-e": "--export", "-E": "--edit", "-H": "--hours",
+KNOWN_FLAGS = {"-h", "--help", "--setup", "--export", "--view", "--hours", *HOURS_FLAGS}
+SHORT_FLAGS = {"-s": "--setup", "-e": "--export", "-v": "--view", "-H": "--hours",
                "-d": "--hours-day", "-w": "--hours-week", "-m": "--hours-month"}
 
 
@@ -1342,8 +1435,8 @@ def main(argv):
     if "--export" in argv:
         show_dir(cfg)
         return
-    if "--edit" in argv:
-        edit_entry(cfg)
+    if "--view" in argv:
+        view_entry(cfg)
         return
     if "--hours" in argv or any(a in HOURS_FLAGS for a in argv):
         show_hours(cfg, next((HOURS_FLAGS[a] for a in argv if a in HOURS_FLAGS), None))
