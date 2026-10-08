@@ -485,35 +485,34 @@ def select_numbered(question, options, default=0):
     return options[int(ans) - 1] if ans.isdigit() and 0 < int(ans) <= len(options) else options[default]
 
 
-def _menu_loop(fd, options, default, draw, window=10, back=False, checked=None):
-    """Arrow-key menu: ↑/↓ or j/k move, space/enter or a number picks that option, typing filters.
+def _menu_loop(fd, options, default, draw, window=10, back=False, checked=None, actions=None):
+    """Arrow-key menu: ↑/↓ or j/k move, space/enter or a number picks that option.
     With `checked` (a list of bools, changed in place) it is a checklist instead: space or a
-    number toggles an option and enter submits. `draw(lines)` renders it.
-    Returns the chosen option (True for a checklist), or None for "Back"."""
-    idx, query, number = default, "", ""
+    number toggles an option and enter submits. `actions` ({key: name}) are extra keys that pick
+    the highlighted option. `draw(lines)` renders it.
+    Returns the chosen option (True for a checklist), or None for "Back"; with `actions`, the
+    option comes as (option, action name or None)."""
+    idx, number = default, ""
     width = len(str(len(options)))
+    rows = list(range(len(options))) + ([None] if back else [])
     while True:
-        view = [i for i, o in enumerate(options) if query.lower() in o.lower()] or list(range(len(options)))
-        rows = view + ([None] if back else [])
-        idx = min(idx, len(rows) - 1)
-        top = max(0, min(min(idx, len(view) - 1) - window // 2, len(view) - window))
+        top = max(0, min(min(idx, len(options) - 1) - window // 2, len(options) - window))
         lines = []
-        for pos in range(top, min(top + window, len(view))):
-            box = "" if checked is None else f"[{'x' if checked[view[pos]] else ' '}] "
-            text = f"{view[pos] + 1:>{width}}. {box}{options[view[pos]]}"
-            lines.append(f"{CYAN}❯ {text}{RESET}" if pos == idx else f"  {text}")
+        for i in range(top, min(top + window, len(options))):
+            box = "" if checked is None else f"[{'x' if checked[i] else ' '}] "
+            text = f"{i + 1:>{width}}. {box}{options[i]}"
+            lines.append(f"{CYAN}❯ {text}{RESET}" if i == idx else f"  {text}")
         if back:
             text = f"{0:>{width}}. ← Back"
-            lines.append(f"{CYAN}❯ {text}{RESET}" if idx == len(view) else f"  {DIM}{text}{RESET}")
+            lines.append(f"{CYAN}❯ {text}{RESET}" if idx == len(options) else f"  {DIM}{text}{RESET}")
         pick_word = "toggle" if checked is not None else "select"
         if number:
             hint = f"{DIM}  number: {RESET}{number}{DIM} · space to {pick_word}{RESET}"
-        elif query:
-            hint = f"{DIM}  filter: {RESET}{query}"
         elif checked is not None:
-            hint = f"{DIM}  ↑/↓ or j/k move · space or number toggle · enter done · type to filter{RESET}"
+            hint = f"{DIM}  ↑/↓ or j/k move · space or number toggle · enter done{RESET}"
         else:
-            hint = f"{DIM}  ↑/↓ or j/k move · space, enter or number select · type to filter{RESET}"
+            keys = "".join(f" · {k.decode()} {name}" for k, name in (actions or {}).items())
+            hint = f"{DIM}  ↑/↓ or j/k move · space, enter or number select{keys}{RESET}"
         lines.append(hint)
         draw(lines)
 
@@ -525,31 +524,28 @@ def _menu_loop(fd, options, default, draw, window=10, back=False, checked=None):
             if rows[idx] is None:
                 return None
             if checked is None:
-                return options[rows[idx]]
-            checked[rows[idx]] = not checked[rows[idx]]
-        elif k == b"\x1b[A" or (k == b"k" and not query):
+                return (options[idx], None) if actions else options[idx]
+            checked[idx] = not checked[idx]
+        elif actions and k in actions:
+            if rows[idx] is not None:
+                return options[idx], actions[k]
+        elif k in (b"\x1b[A", b"k"):
             idx = (idx - 1) % len(rows)
-        elif k == b"\x1b[B" or (k == b"j" and not query):
+        elif k in (b"\x1b[B", b"j"):
             idx = (idx + 1) % len(rows)
-        elif k in (b"\x7f", b"\x08"):
-            if not typed:
-                query, idx = query[:-1], 0
         elif len(k) == 1 and k.isdigit():
             if back and not typed and k == b"0":
                 return None
-            # Pick as soon as the number can't grow into another visible option's number
+            # Pick as soon as the number can't grow into another option's number
             typed += k.decode()
-            matches = [pos for pos, i in enumerate(view) if str(i + 1).startswith(typed)]
-            exact = [pos for pos in matches if str(view[pos] + 1) == typed]
-            if exact and len(matches) == 1:
-                idx = exact[0]
+            matches = [i for i in range(len(options)) if str(i + 1).startswith(typed)]
+            if len(matches) == 1 and str(matches[0] + 1) == typed:
+                idx = matches[0]
                 if checked is None:
-                    return options[view[idx]]
-                checked[view[idx]] = not checked[view[idx]]
+                    return (options[idx], None) if actions else options[idx]
+                checked[idx] = not checked[idx]
             elif matches:
-                idx, number = (exact or matches)[0], typed
-        elif len(k) == 1 and 32 < k[0] < 127:
-            query, idx = query + k.decode(), 0
+                idx, number = matches[0], typed
 
 
 def ask(question, default=""):
@@ -714,7 +710,7 @@ class Form:
         sys.stdout.flush()
         self.drawn = len(lines)
 
-    def _menu(self, key, question, options, default, checked=None, summary=None):
+    def _menu(self, key, question, options, default, checked=None, summary=None, actions=None):
         """Run `_menu_loop` under the panel (TTY only). `summary()`, if given, is the
         panel value for `key`, refreshed on every redraw."""
         self.active = key
@@ -734,7 +730,7 @@ class Form:
         sys.stdout.write("\033[?25l")
         try:
             choice = _menu_loop(fd, options, default, draw, window=max(3, min(10, room)),
-                                back=self.can_back, checked=checked)
+                                back=self.can_back, checked=checked, actions=actions)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
             sys.stdout.write("\033[?25h")
@@ -742,14 +738,17 @@ class Form:
             raise Back
         return choice
 
-    def select(self, key, question, options, default=0):
-        """Menu for `key`, drawn under the panel."""
+    def select(self, key, question, options, default=0, actions=None):
+        """Menu for `key`, drawn under the panel. With `actions` (see `_menu_loop`) it returns
+        (choice, action name or None); without a TTY the action is always None."""
         if not self.live:
-            choice = select_numbered(question, options, default)
+            choice, action = select_numbered(question, options, default), None
+        elif actions:
+            choice, action = self._menu(key, question, options, default, actions=actions)
         else:
             choice = self._menu(key, question, options, default)
         self.set(key, choice)
-        return choice
+        return (choice, action) if actions else choice
 
     def checklist(self, key, question, options, checked, summary):
         """Checklist for `key` (TTY only): space toggles, enter submits. `checked` is
@@ -1260,8 +1259,9 @@ def hours_table(cfg):
 
 
 def view_entry(cfg):
-    """Pick a recent entry and show it; e there changes its answers, d deletes it. After an edit is
-    saved the list is shown again, with a changed entry highlighted; without a TTY it ends there."""
+    """Pick a recent entry and show it; e there changes its answers, d deletes it, and n in the list
+    logs a new one. After a change is saved the list is shown again, with a changed or new entry
+    highlighted; without a TTY it ends there."""
     found = recent_entries(cfg)
     changed = None  # (path, row) of the entry to highlight after changing it
     while True:
@@ -1280,7 +1280,7 @@ def view_entry(cfg):
 
 def _view_form(cfg, found, changed=None):
     """One pass of `view_entry`: list, show, edit. The list starts on the entry at `changed`.
-    Returns None when done viewing, else "deleted" or the (path, row) of the changed entry."""
+    Returns None when done viewing, else "deleted" or the (path, row) of the changed or new entry."""
     labels = []
     for _, e in found:
         desc = e.get("Description", "")
@@ -1291,11 +1291,49 @@ def _view_form(cfg, found, changed=None):
             labels[-1] += " ·"
     st = {}
 
+    def show_fields():
+        e = st["entry"]
+        form.fields = ENTRY_FIELDS + VIEW_FIELDS
+        for key, col in (("billable", "Billable"), ("sentiment", "Sentiment"), ("ticket", "TicketNumber")):
+            form.set(key, str(e.get(col, "")))
+        form.set("file", st["path"].replace(os.path.expanduser("~"), "~", 1))
+
+    def sure_delete():
+        if form.live:
+            return form.keypress("Delete this entry? (y/N)", "y delete · n or enter keep it",
+                                 {b"y", b"Y", b"n", b"N", b"\r", b"\n"}) in (b"y", b"Y")
+        return ask("Delete this entry? (y/N)").lower() in ("y", "yes")
+
     def choose():
-        form.fields = []  # the hours table is shown above the list instead of the panel
-        if not form.live:
-            print("\n".join(form.table) + "\n")
-        label = form.select(None, "Which entry?", labels, labels.index(st["label"]) if "label" in st else 0)
+        """The list; e or d there edits or deletes the highlighted entry without showing it first,
+        n logs a new entry (asking the questions set to be asked every time)."""
+        while True:
+            form.fields = []  # the hours table is shown above the list instead of the panel
+            asking.update(dict.fromkeys(asking, True))  # editing asks every question
+            if not form.live:
+                print("\n".join(form.table) + "\n")
+            label, action = form.select(None, "Which entry?", labels,
+                                        labels.index(st["label"]) if "label" in st else 0,
+                                        actions={b"e": "edit", b"d": "delete", b"n": "new"})
+            if action == "new":
+                asking.update(ask_flags(cfg))
+                st.clear()
+                st.update(new=True, label=label, days=week_of(dt.date.today()))
+                form.values.clear()
+                form.fields = ENTRY_FIELDS
+                return steps.index(show) + 1
+            pick_entry(label)
+            if action == "edit":
+                form.fields = ENTRY_FIELDS
+                return steps.index(show) + 1
+            if action != "delete":
+                return None
+            show_fields()
+            if sure_delete():
+                st["delete"] = True
+                return len(steps)
+
+    def pick_entry(label):
         path, e = found[labels.index(label)]
         st.clear()
         st.update(label=label, path=path, entry=e, prefill=True, days=week_of(e["Date"]), date=e["Date"],
@@ -1308,11 +1346,7 @@ def _view_form(cfg, found, changed=None):
             form.set(key, value)
 
     def show():
-        e = st["entry"]
-        form.fields = ENTRY_FIELDS + VIEW_FIELDS
-        for key, col in (("billable", "Billable"), ("sentiment", "Sentiment"), ("ticket", "TicketNumber")):
-            form.set(key, str(e.get(col, "")))
-        form.set("file", st["path"].replace(os.path.expanduser("~"), "~", 1))
+        show_fields()
         if not form.live:
             label_w = max(len(label) for _, label in form.fields)
             for key, label in form.fields:
@@ -1329,12 +1363,7 @@ def _view_form(cfg, found, changed=None):
                 k = ask("e to edit, d to delete, enter to finish").lower()[:1]
             if k != "d":
                 break
-            if form.live:
-                sure = form.keypress("Delete this entry? (y/N)", "y delete · n or enter keep it",
-                                     {b"y", b"Y", b"n", b"N", b"\r", b"\n"}) in (b"y", b"Y")
-            else:
-                sure = ask("Delete this entry? (y/N)").lower() in ("y", "yes")
-            if sure:
+            if sure_delete():
                 st["delete"] = True
                 return len(steps)
         if k != "e":
@@ -1342,9 +1371,10 @@ def _view_form(cfg, found, changed=None):
             return len(steps)
         form.fields = ENTRY_FIELDS
 
+    asking = {key: True for key, _ in ASK_FIELDS}
     with Form([]) as form:
         form.table = hours_table(cfg)
-        steps = [choose, show] + entry_steps(cfg, form, st, {key: True for key, _ in ASK_FIELDS})
+        steps = [choose, show] + entry_steps(cfg, form, st, asking)
         match = [label for label, (path, e) in zip(labels, found) if (path, e["_row"]) == changed]
         if match:
             st["label"] = match[0]
@@ -1352,9 +1382,15 @@ def _view_form(cfg, found, changed=None):
 
     if st.get("viewed"):
         return None
+    if st.get("new"):
+        path, = save_entries(cfg, [entry_values(cfg, st, cfg["defaults"]["sentiment"])])
+        say(f"\n{GREEN}✔ Saved{RESET} " + entry_summary(st["date"], st["project"], st["category"],
+                                                        st["hours"], st["mins"], st["location"]))
+        say(f"{DIM}  → {path}{RESET}")
+        return path, max(n["_row"] for n in read_entries(path))
     path, e = st["path"], st["entry"]
     template = template_path(cfg)
-    if st["delete"]:
+    if st.get("delete"):
         update_row(path, template, e["_row"])
         say(f"\n{GREEN}✔ Deleted{RESET} " + entry_summary(e["Date"], e.get("Project", "?"), e.get("Category", "?"),
                                                         e["Hours"], e["Minutes"], e.get("WorkedFrom", "?")))
