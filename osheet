@@ -1216,34 +1216,37 @@ def entries_text(n):
 
 # --- view entries ----------------------------------------------------------
 
-EDIT_WEEKS = 5  # entries from this week and the four before it can be edited or viewed
-
 # Extra panel rows shown while viewing an entry (dropped again when editing it)
 VIEW_FIELDS = [("billable", "Billable"), ("sentiment", "Sentiment"), ("ticket", "Ticket"), ("file", "File")]
 
 
-def recent_entries(cfg):
-    """(path, entry) for entries from the last EDIT_WEEKS weeks, newest first."""
-    today = dt.date.today()
-    start = today - dt.timedelta(days=today.weekday() + 7 * (EDIT_WEEKS - 1))
-    end = week_of(today)[-1]
-    found = []
+def month_range(today=None):
+    """First and last day of the month `today` (default: today) is in."""
+    today = today or dt.date.today()
+    return today.replace(day=1), today.replace(day=calendar.monthrange(today.year, today.month)[1])
+
+
+def entries_between(cfg, start, end):
+    """(path, entry) for entries dated `start` to `end`, from every file those days fall in."""
     dates = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
+    found = []
     for path in dict.fromkeys(output_path(cfg, d) for d in dates):
         if os.path.exists(path):
             found += [(path, e) for e in read_entries(path) if start <= e["Date"] <= end]
+    return found
+
+
+def month_entries(cfg):
+    """(path, entry) for entries from the current month, newest first."""
+    found = entries_between(cfg, *month_range())
     return sorted(found, key=lambda pe: (pe[1]["Date"], pe[1]["_row"]), reverse=True)
 
 
 def minutes_by_day(cfg, start, end):
     """Logged minutes per date from `start` to `end`, from every file those days fall in."""
-    dates = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
     days = {}
-    for path in dict.fromkeys(output_path(cfg, d) for d in dates):
-        if os.path.exists(path):
-            for e in read_entries(path):
-                if start <= e["Date"] <= end:
-                    days[e["Date"]] = days.get(e["Date"], 0) + e["Hours"] * 60 + e["Minutes"]
+    for _, e in entries_between(cfg, start, end):
+        days[e["Date"]] = days.get(e["Date"], 0) + e["Hours"] * 60 + e["Minutes"]
     return days
 
 
@@ -1251,8 +1254,7 @@ def hours_table(cfg):
     """Boxed table of the time logged per day and per week in the current month (oldest week
     first), with the month's total. Days of a week outside the month are left blank."""
     today = dt.date.today()
-    month = today.replace(day=1)
-    month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    month, month_end = month_range(today)
     days = minutes_by_day(cfg, month, month_end)
     weekend = any(d.weekday() > 4 for d in days)
     names = ["Mon", "Tue", "Wed", "Thu", "Fri"] + (["Sat", "Sun"] if weekend else [])
@@ -1300,16 +1302,16 @@ def view_entry(cfg):
     """Pick a recent entry and show it; e there changes its answers, d deletes it, and n in the list
     logs a new one. After a change is saved the list is shown again, with a changed or new entry
     highlighted; without a TTY it ends there."""
-    found = recent_entries(cfg)
+    found = month_entries(cfg)
     changed = None  # (path, row) of the entry to highlight after changing it
     while True:
         if not found:
-            say(f"{DIM}No entries logged in the last {EDIT_WEEKS} weeks.{RESET}")
+            say(f"{DIM}No entries logged this month.{RESET}")
             return
         done = _view_form(cfg, found, changed)
         if done is None:
             return
-        found = recent_entries(cfg)
+        found = month_entries(cfg)
         changed = done if done != "deleted" else None
         if not (termios is not None and sys.stdin.isatty()):
             return
@@ -1317,7 +1319,7 @@ def view_entry(cfg):
 
 
 def _view_form(cfg, found, changed=None):
-    """One pass of `view_entry`: list, show, edit. The list starts on the entry at `changed`.
+    """One pass of `view_entry`: week, list, show, edit. The list starts on the entry at `changed`.
     Returns None when done viewing, else "deleted" or the (path, row) of the changed or new entry."""
     labels = []
     for _, e in found:
@@ -1328,6 +1330,15 @@ def _view_form(cfg, found, changed=None):
         while labels.count(labels[-1]) > 1:  # menus return the label, so keep them unique
             labels[-1] += " ·"
     st = {}
+    month, month_end = month_range()
+    weeks = sorted({week_of(e["Date"])[0] for _, e in found})  # their Mondays, oldest first
+    week_labels = []
+    for monday in weeks:
+        in_week = [e for _, e in found if week_of(e["Date"])[0] == monday]
+        week_labels.append(f"{max(monday, month):%d}–{min(monday + dt.timedelta(days=6), month_end):%d %b} · "
+                           f"{entries_text(len(in_week))} · "
+                           f"{fmt_minutes(sum(e['Hours'] * 60 + e['Minutes'] for e in in_week))}")
+    view = {"week": weeks[-1]}
 
     def show_fields():
         e = st["entry"]
@@ -1342,16 +1353,26 @@ def _view_form(cfg, found, changed=None):
                                  {b"y", b"Y", b"n", b"N", b"\r", b"\n"}) in (b"y", b"Y")
         return ask("Delete this entry? (y/N)").lower() in ("y", "yes")
 
+    def week():
+        """The week of the month to list entries from; skipped the first time round after a change
+        (the list opens on the changed entry's week)."""
+        form.fields = []  # the hours table is shown above the menus instead of the panel
+        if not form.live:
+            print("\n".join(form.table) + "\n")
+        if view.pop("skip", False):
+            return None  # not SKIP, so Back from the list still comes here
+        label = form.select(None, "Which week?", week_labels, weeks.index(view["week"]))
+        view["week"] = weeks[week_labels.index(label)]
+
     def choose():
         """The list; e or d there edits or deletes the highlighted entry without showing it first,
         n logs a new entry (asking the questions set to be asked every time)."""
+        shown = [label for label, (_, e) in zip(labels, found) if week_of(e["Date"])[0] == view["week"]]
         while True:
-            form.fields = []  # the hours table is shown above the list instead of the panel
+            form.fields = []
             asking.update(dict.fromkeys(asking, True))  # editing asks every question
-            if not form.live:
-                print("\n".join(form.table) + "\n")
-            label, action = form.select(None, "Which entry?", labels,
-                                        labels.index(st["label"]) if "label" in st else 0,
+            label, action = form.select(None, "Which entry?", shown,
+                                        shown.index(st["label"]) if st.get("label") in shown else 0,
                                         actions={b"e": "edit", b"d": "delete", b"n": "new"})
             if action == "new":
                 asking.update(ask_flags(cfg))
@@ -1412,10 +1433,11 @@ def _view_form(cfg, found, changed=None):
     asking = {key: True for key, _ in ASK_FIELDS}
     with Form([]) as form:
         form.table = hours_table(cfg)
-        steps = [choose, show] + entry_steps(cfg, form, st, asking)
-        match = [label for label, (path, e) in zip(labels, found) if (path, e["_row"]) == changed]
+        steps = [week, choose, show] + entry_steps(cfg, form, st, asking)
+        match = [(label, e) for label, (path, e) in zip(labels, found) if (path, e["_row"]) == changed]
         if match:
-            st["label"] = match[0]
+            st["label"] = match[0][0]
+            view.update(week=week_of(match[0][1]["Date"])[0], skip=True)
         form.run(steps)
 
     if st.get("viewed"):

@@ -99,7 +99,7 @@ Upgrading from an earlier version: osheet asks once how to group files, then mov
 osheet --list     # or -l
 ```
 
-Shows a table of the time logged on each day of the current month, one row per week (oldest first, labelled with its first and last day in the month, e.g. `05–11 Oct`, with week totals, today highlighted, and Saturday/Sunday only when there are weekend entries), followed by the month's total. Days of a week that fall outside the month are left blank and not counted. Below it, the entries from this week and the four before it are listed, newest first. In the list, `e` or `d` edits or deletes the highlighted entry straight away (as below; Back from the first edit question returns to the list), and `n` logs a new entry, asking the same questions as `osheet` (Back from its first question returns to the list). Pick one to see all its details in the panel, including the full description, billable flag, sentiment, ticket number and the file it's in. Then press:
+Shows a table of the time logged on each day of the current month, one row per week (oldest first, labelled with its first and last day in the month, e.g. `05–11 Oct`, with week totals, today highlighted, and Saturday/Sunday only when there are weekend entries), followed by the month's total. Days of a week that fall outside the month are left blank and not counted. Below it, pick one of the month's weeks that has entries (each shown with its number of entries and total time); its entries are then listed, newest first, and Back returns to the week question. In the list, `e` or `d` edits or deletes the highlighted entry straight away (as below; Back from the first edit question returns to the list), and `n` logs a new entry, asking the same questions as `osheet` (Back from its first question returns to the list). Pick one to see all its details in the panel, including the full description, billable flag, sentiment, ticket number and the file it's in. Then press:
 
 | Key | Action |
 |---|---|
@@ -108,7 +108,7 @@ Shows a table of the time logged on each day of the current month, one row per w
 | `0` or `b` | back to the list |
 | Enter or `q` | finish |
 
-When editing, the day can be moved within the entry's own week; the row is updated in place, or moved to another file if the new day belongs to a different week or month. The sentiment and ticket number are kept as they were. Once an edit, delete or new entry is saved you return to the list, with a changed or new entry highlighted.
+When editing, the day can be moved within the entry's own week; the row is updated in place, or moved to another file if the new day belongs to a different week or month. The sentiment and ticket number are kept as they were. Once an edit, delete or new entry is saved you return to the list of that entry's week, with a changed or new entry highlighted.
 
 Without a TTY the details are printed as plain lines, followed by a question where `e` edits the entry and `d` deletes it; osheet exits after the change is saved.
 
