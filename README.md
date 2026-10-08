@@ -4,11 +4,36 @@ Interactive terminal tool for logging timesheet entries into an Excel file built
 
 ## Install
 
+Requires Python 3.8+ (standard library only). On Windows, menus fall back to numbered input.
+
+1. Clone the repo:
+
+   ```bash
+   git clone https://github.com/dewald-L/osheet.git ~/Projects/osheet
+   ```
+
+2. Put `osheet` on your `PATH` (it's executable and starts with `#!/usr/bin/env python3`, so a symlink is enough):
+
+   ```bash
+   mkdir -p ~/.local/bin && ln -s ~/Projects/osheet/osheet ~/.local/bin/osheet
+   ```
+
+   If `~/.local/bin` isn't on your `PATH` yet, add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zshrc` or `~/.bashrc` and open a new shell.
+
+3. Get a copy of your `TimesheetUpload.xlsx` template. It isn't part of this repo; setup looks for it at `~/Downloads/TimesheetUpload.xlsx` by default, but you can enter any path.
+
+4. Run `osheet` to go through [setup](#setup), then run it again to log entries. Pulling the repo (`git pull`) updates osheet in place.
+
+### Moving to a new machine
+
+Instead of running setup again, you can copy the config folder (see [Setup](#setup) for its location) from the old machine. It holds `config.json` and the stored `template.xlsx`, so you don't need the original template. To keep your existing entries for `--list` and `--hours`, also copy the timesheets folder (default `~/timesheets`):
+
 ```bash
-ln -s "$PWD/osheet" ~/.local/bin/osheet
+scp -r oldmachine:.config/osheet ~/.config/
+scp -r oldmachine:timesheets ~/
 ```
 
-Requires Python 3.8+ (standard library only). On Windows, menus fall back to numbered input.
+`config.json` stores absolute paths, so if your home folder is different on the new machine, run `osheet --setup` afterwards to update them.
 
 ## Setup
 
@@ -128,3 +153,7 @@ osheet --export   # or -e
 ```
 
 Prints the folder holding the current week's/month's timesheet as a clickable link and copies the path to the clipboard (`wl-copy`, `xclip` or `xsel` on Linux, `pbcopy` on macOS, `clip` on Windows).
+
+## License
+
+[MIT](LICENSE)
