@@ -5,7 +5,7 @@ User-facing behaviour is in README.md; update it when the UX or flags change.
 
 ## Constraints
 - Stdlib only, one file. Match the existing style: `# --- section ---` comments, small helpers,
-  ANSI constants (BOLD/DIM/CYAN/GREEN/RED/MAGENTA/RESET).
+  ANSI constants (BOLD/DIM/CYAN/GREEN/RED/MAGENTA/ORANGE/RESET).
 - No curses or alternate screen: the final panel must stay in the scrollback.
 - Don't change the config format or the Excel output (rows appended into the template's table).
 

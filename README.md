@@ -34,7 +34,7 @@ osheet
 
 Prompts for:
 
-1. **Day**: defaults to today; any day of the current week (Mon–Sun)
+1. **Day**: defaults to today; any day of the current week (Mon–Sun). Each day shows the time already logged and a progress bar towards 8 hours (green, or orange past 8 hours); the panel shows the bar and time next to the chosen day (when editing, the entry being edited isn't counted). Without a TTY, days with entries show e.g. `2h15 logged` instead
 2. **Project**: defaults to your configured default
 3. **Entry type** (category), filtered by project; Billable is set from the project
 4. **Total time**: `1:20`, `1h20`, `80m`, `1.5` or `90`; rounded **up** to the next 15 minutes

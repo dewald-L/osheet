@@ -43,8 +43,8 @@ OUTPUT_NAME = "TimesheetUpload.xlsx"
 DEFAULT_OUTPUT = os.path.join("~", "timesheets", OUTPUT_NAME)
 DEFAULT_TEMPLATE = os.path.join("~", "Downloads", "TimesheetUpload.xlsx")
 
-BOLD, DIM, CYAN, GREEN, RED, MAGENTA, RESET = (
-    "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[31m", "\033[35m", "\033[0m")
+BOLD, DIM, CYAN, GREEN, RED, MAGENTA, ORANGE, RESET = (
+    "\033[1m", "\033[2m", "\033[36m", "\033[32m", "\033[31m", "\033[35m", "\033[38;5;208m", "\033[0m")
 
 
 # --- config ----------------------------------------------------------------
@@ -1030,6 +1030,17 @@ def check_description(raw):
     return raw
 
 
+DAY_MINUTES = 8 * 60  # a full day, 100% on the day's progress bar
+BAR_CELLS = 16        # half an hour per cell
+
+
+def day_bar(mins):
+    """Progress bar of `mins` against a full day: green, or orange past DAY_MINUTES."""
+    full, half = divmod(min(mins, DAY_MINUTES) * BAR_CELLS * 2 // DAY_MINUTES, 2)
+    bar = "█" * full + "▌" * half
+    return f"{ORANGE if mins > DAY_MINUTES else GREEN}{bar}{RESET}{DIM}{'░' * (BAR_CELLS - len(bar))}{RESET}"
+
+
 def week_of(date):
     monday = date - dt.timedelta(days=date.weekday())
     return [monday + dt.timedelta(days=i) for i in range(7)]
@@ -1043,17 +1054,40 @@ def entry_steps(cfg, form, st, asking):
     today = dt.date.today()
     projects = list(cfg["projects"])
 
+    def logged(days):
+        """Minutes already logged on each of `days`, leaving out the entry being edited."""
+        mins = minutes_by_day(cfg, days[0], days[-1])
+        if "entry" in st:
+            e = st["entry"]
+            mins[e["Date"]] = mins.get(e["Date"], 0) - e["Hours"] * 60 - e["Minutes"]
+        return mins
+
+    def logged_note(mins):
+        return f"({fmt_minutes(mins)} already logged)" if mins else ""
+
+    def day_text(date, mins):
+        return f"{date:%A %d %b}" + (f"  {day_bar(mins)}" if form.live else "")
+
     def day():
         if not asking["day"]:
             st["date"] = today
-            form.set("day", f"{today:%A %d %b}", SKIPPED)
+            mins = logged([today]).get(today, 0)
+            form.set("day", day_text(today, mins), " ".join(filter(None, [logged_note(mins), SKIPPED])))
             return SKIP
         days = st["days"]
-        labels = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
+        mins = logged(days)
+        names = [f"{d:%A %d %b}" + ("  (today)" if d == today else "") for d in days]
+        w = max(map(len, names))
+        if form.live:  # hours first: the bar's colours end the highlighted row's colour
+            labels = [f"{n:<{w}}  {fmt_minutes(mins[d]) if mins.get(d) else '':>5}  {day_bar(mins.get(d, 0))}"
+                      for n, d in zip(names, days)]
+        else:
+            labels = [f"{n:<{w}}  {fmt_minutes(mins[d])} logged" if mins.get(d) else n
+                      for n, d in zip(names, days)]
         label = form.select("day", "Which day is the timesheet for?", labels,
                             pick(days, st.get("date"), pick(days, today)))
         st["date"] = days[labels.index(label)]
-        form.set("day", f"{st['date']:%A %d %b}")
+        form.set("day", day_text(st["date"], mins.get(st["date"], 0)), logged_note(mins.get(st["date"], 0)))
 
     def project():
         if not asking["project"] and defaults["project"] in projects:
